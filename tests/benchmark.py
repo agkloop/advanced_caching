@@ -38,13 +38,14 @@ def slow_function(user_id: int) -> dict:
         "id": user_id,
         "name": f"User{user_id}",
         "email": f"user{user_id}@example.com",
-        "active": True
+        "active": True,
     }
 
 
 # ============================================================================
 # Benchmark Utilities
 # ============================================================================
+
 
 class BenchmarkResult:
     """Container for benchmark results."""
@@ -85,9 +86,11 @@ class BenchmarkResult:
             if speedup >= 1:
                 speedup_str = f"  {speedup:>6.0f}x faster"
             else:
-                speedup_str = f"  {(1/speedup):>6.1f}x slower"
+                speedup_str = f"  {(1 / speedup):>6.1f}x slower"
 
-        print(f"  {self.name:<30} {self.median_ms:>10.4f}ms {self.mean_ms:>10.4f}ms {self.stdev_ms:>10.4f}ms{speedup_str}")
+        print(
+            f"  {self.name:<30} {self.median_ms:>10.4f}ms {self.mean_ms:>10.4f}ms {self.stdev_ms:>10.4f}ms{speedup_str}"
+        )
         if self.notes:
             print(f"    ↳ {self.notes}")
 
@@ -97,7 +100,7 @@ def run_benchmark(
     warmups: int = 100,
     runs: int = 1000,
     name: str = "Test",
-    notes: str = ""
+    notes: str = "",
 ) -> BenchmarkResult:
     """Run a benchmark and collect timing statistics."""
 
@@ -120,6 +123,7 @@ def run_benchmark(
 # Benchmark 1: Cold Cache (Cache Miss Performance)
 # ============================================================================
 
+
 def benchmark_cold_cache():
     """Benchmark: Cold cache - cache miss overhead."""
     print("\n" + "=" * 90)
@@ -135,7 +139,7 @@ def benchmark_cold_cache():
         warmups=5,
         runs=100,
         name="No Cache (baseline)",
-        notes="Direct function call"
+        notes="Direct function call",
     )
     results.append(baseline)
 
@@ -147,12 +151,14 @@ def benchmark_cold_cache():
         return slow_function(user_id)
 
     ttl_result = run_benchmark(
-        lambda: (ttl_counter.__setitem__("val", ttl_counter["val"] + 1),
-                 ttl_uncached(ttl_counter["val"]))[1],
+        lambda: (
+            ttl_counter.__setitem__("val", ttl_counter["val"] + 1),
+            ttl_uncached(ttl_counter["val"]),
+        )[1],
         warmups=5,
         runs=100,
         name="TTLCache",
-        notes="Different keys each call (always cold)"
+        notes="Different keys each call (always cold)",
     )
     results.append(ttl_result)
 
@@ -164,12 +170,14 @@ def benchmark_cold_cache():
         return slow_function(user_id)
 
     lru_result = run_benchmark(
-        lambda: (lru_counter.__setitem__("val", lru_counter["val"] + 1),
-                 lru_uncached(lru_counter["val"]))[1],
+        lambda: (
+            lru_counter.__setitem__("val", lru_counter["val"] + 1),
+            lru_uncached(lru_counter["val"]),
+        )[1],
         warmups=5,
         runs=100,
         name="functools.lru_cache",
-        notes="Different keys each call (always cold)"
+        notes="Different keys each call (always cold)",
     )
     results.append(lru_result)
 
@@ -192,7 +200,7 @@ def benchmark_cold_cache():
         warmups=5,
         runs=100,
         name="InMemCache (direct)",
-        notes="Manual cache management"
+        notes="Manual cache management",
     )
     results.append(inmem_result)
 
@@ -209,6 +217,7 @@ def benchmark_cold_cache():
 # Benchmark 2: Hot Cache (Cache Hit Performance)
 # ============================================================================
 
+
 def benchmark_hot_cache():
     """Benchmark: Hot cache - pure cache hit speed."""
     print("\n" + "=" * 90)
@@ -224,7 +233,7 @@ def benchmark_hot_cache():
         warmups=5,
         runs=100,
         name="No Cache (baseline)",
-        notes="Direct function call"
+        notes="Direct function call",
     )
     results.append(baseline)
 
@@ -239,7 +248,7 @@ def benchmark_hot_cache():
         warmups=100,
         runs=5000,
         name="TTLCache",
-        notes="Same key repeated (always hot)"
+        notes="Same key repeated (always hot)",
     )
     results.append(ttl_result)
 
@@ -254,7 +263,7 @@ def benchmark_hot_cache():
         warmups=100,
         runs=5000,
         name="SWRCache",
-        notes="Fresh cache (immediate return)"
+        notes="Fresh cache (immediate return)",
     )
     results.append(swr_result)
 
@@ -269,7 +278,7 @@ def benchmark_hot_cache():
         warmups=100,
         runs=5000,
         name="functools.lru_cache",
-        notes="Pure memoization"
+        notes="Pure memoization",
     )
     results.append(lru_result)
 
@@ -283,7 +292,7 @@ def benchmark_hot_cache():
         warmups=100,
         runs=5000,
         name="InMemCache (direct)",
-        notes="Manual cache.get() calls"
+        notes="Manual cache.get() calls",
     )
     results.append(inmem_result)
 
@@ -298,7 +307,7 @@ def benchmark_hot_cache():
         warmups=100,
         runs=5000,
         name="BGCache",
-        notes="Pre-loaded in background"
+        notes="Pre-loaded in background",
     )
     results.append(bg_result)
 
@@ -315,6 +324,7 @@ def benchmark_hot_cache():
 # ============================================================================
 # Benchmark 3: Mixed Workload (Varying Keys)
 # ============================================================================
+
 
 def benchmark_mixed_workload():
     """Benchmark: Mixed workload with varying keys."""
@@ -334,7 +344,7 @@ def benchmark_mixed_workload():
         warmups=0,
         runs=2000,
         name="No Cache (baseline)",
-        notes="Direct function call"
+        notes="Direct function call",
     )
     results.append(baseline)
 
@@ -351,7 +361,7 @@ def benchmark_mixed_workload():
         warmups=0,
         runs=2000,
         name="TTLCache",
-        notes="~50% hit rate (100 keys, ~2000 accesses)"
+        notes="~50% hit rate (100 keys, ~2000 accesses)",
     )
     results.append(ttl_result)
 
@@ -368,7 +378,7 @@ def benchmark_mixed_workload():
         warmups=0,
         runs=2000,
         name="SWRCache",
-        notes="~50% hit rate with stale grace"
+        notes="~50% hit rate with stale grace",
     )
     results.append(swr_result)
 
@@ -385,7 +395,7 @@ def benchmark_mixed_workload():
         warmups=0,
         runs=2000,
         name="functools.lru_cache",
-        notes="Pure memoization with ~50% hit rate"
+        notes="Pure memoization with ~50% hit rate",
     )
     results.append(lru_result)
 
@@ -401,6 +411,7 @@ def benchmark_mixed_workload():
 # ============================================================================
 # Benchmark 4: Background Loading
 # ============================================================================
+
 
 def benchmark_background_loading():
     """Benchmark: Background vs on-demand loading."""
@@ -421,7 +432,7 @@ def benchmark_background_loading():
         warmups=2,
         runs=50,
         name="No Cache (baseline)",
-        notes="Direct heavy call (50ms each)"
+        notes="Direct heavy call (50ms each)",
     )
     results.append(baseline)
 
@@ -436,7 +447,7 @@ def benchmark_background_loading():
         warmups=100,
         runs=5000,
         name="BGCache",
-        notes="Background pre-loaded (no delay)"
+        notes="Background pre-loaded (no delay)",
     )
     results.append(bg_result)
 
@@ -451,7 +462,7 @@ def benchmark_background_loading():
         warmups=100,
         runs=5000,
         name="TTLCache",
-        notes="On-demand with hot cache"
+        notes="On-demand with hot cache",
     )
     results.append(ttl_result)
 
@@ -468,6 +479,7 @@ def benchmark_background_loading():
 # ============================================================================
 # Summary & Main
 # ============================================================================
+
 
 def print_summary(all_results):
     """Print a summary of all benchmarks."""
@@ -532,4 +544,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

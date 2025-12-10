@@ -44,10 +44,11 @@ Repository = "https://github.com/agkloop/advanced_caching"
 Documentation = "https://github.com/agkloop/advanced_caching#readme"
 Issues = "https://github.com/agkloop/advanced_caching/issues"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.2",
     "pytest-cov>=4.0",
+    "ruff>=0.14.8",
 ]
 
 [tool.pytest.ini_options]

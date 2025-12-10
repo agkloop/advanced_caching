@@ -4,6 +4,7 @@ Storage backends for caching.
 Provides InMemCache (in-memory), RedisCache, HybridCache, and the CacheStorage protocol.
 All storage backends implement the CacheStorage protocol for composability.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -22,9 +23,11 @@ except ImportError:
 # Cache Entry - Internal data structure
 # ============================================================================
 
+
 @dataclass
 class CacheEntry:
     """Internal cache entry with TTL support."""
+
     value: Any
     fresh_until: float  # Unix timestamp
     created_at: float
@@ -41,6 +44,7 @@ class CacheEntry:
 # ============================================================================
 # Storage Protocol - Common interface for all backends
 # ============================================================================
+
 
 class CacheStorage(Protocol):
     """
@@ -92,14 +96,17 @@ def validate_cache_storage(cache: Any) -> bool:
     Returns:
         True if valid, False otherwise
     """
-    required_methods = ['get', 'set', 'delete', 'exists', 'set_if_not_exists']
-    return all(hasattr(cache, method) and callable(getattr(cache, method))
-               for method in required_methods)
+    required_methods = ["get", "set", "delete", "exists", "set_if_not_exists"]
+    return all(
+        hasattr(cache, method) and callable(getattr(cache, method))
+        for method in required_methods
+    )
 
 
 # ============================================================================
 # InMemCache - In-memory storage with TTL
 # ============================================================================
+
 
 class InMemCache:
     """
@@ -130,13 +137,9 @@ class InMemCache:
     def set(self, key: str, value: Any, ttl: int = 0) -> None:
         """Store value for ttl seconds (0=forever)."""
         now = time.time()
-        fresh_until = now + ttl if ttl > 0 else float('inf')
+        fresh_until = now + ttl if ttl > 0 else float("inf")
 
-        entry = CacheEntry(
-            value=value,
-            fresh_until=fresh_until,
-            created_at=now
-        )
+        entry = CacheEntry(value=value, fresh_until=fresh_until, created_at=now)
 
         with self._lock:
             self._data[key] = entry
@@ -178,8 +181,7 @@ class InMemCache:
         with self._lock:
             now = time.time()
             expired_keys = [
-                key for key, entry in self._data.items()
-                if entry.fresh_until < now
+                key for key, entry in self._data.items() if entry.fresh_until < now
             ]
             for key in expired_keys:
                 del self._data[key]
@@ -194,6 +196,7 @@ class InMemCache:
 # ============================================================================
 # RedisCache - Redis-backed storage
 # ============================================================================
+
 
 class RedisCache:
     """
@@ -264,10 +267,7 @@ class RedisCache:
         try:
             data = pickle.dumps(value)
             result = self.client.set(
-                self._make_key(key),
-                data,
-                ex=ttl if ttl > 0 else None,
-                nx=True
+                self._make_key(key), data, ex=ttl if ttl > 0 else None, nx=True
             )
             return bool(result)
         except Exception:
@@ -277,6 +277,7 @@ class RedisCache:
 # ============================================================================
 # HybridCache - L1 (memory) + L2 (Redis) cache
 # ============================================================================
+
 
 class HybridCache:
     """
@@ -297,7 +298,7 @@ class HybridCache:
         self,
         l1_cache: CacheStorage | None = None,
         l2_cache: CacheStorage | None = None,
-        l1_ttl: int = 60
+        l1_ttl: int = 60,
     ):
         """
         Initialize hybrid cache.
@@ -348,5 +349,3 @@ class HybridCache:
         if success:
             self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         return success
-
-

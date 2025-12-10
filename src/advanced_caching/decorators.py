@@ -6,6 +6,7 @@ Provides:
 - SWRCache: Stale-while-revalidate pattern
 - BGCache: Background scheduler-based loading with APScheduler
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +29,7 @@ T = TypeVar("T")
 # TTLCache - Simple TTL-based caching decorator
 # ============================================================================
 
+
 class SimpleTTLCache:
     """
     Simple TTL cache decorator (singleton pattern).
@@ -46,10 +48,7 @@ class SimpleTTLCache:
 
     @classmethod
     def cached(
-        cls,
-        key: str | Callable[..., str],
-        ttl: int,
-        cache: CacheStorage | None = None
+        cls, key: str | Callable[..., str], ttl: int, cache: CacheStorage | None = None
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         Cache decorator with TTL.
@@ -113,6 +112,7 @@ TTLCache = SimpleTTLCache
 # SWRCache - Stale-While-Revalidate pattern
 # ============================================================================
 
+
 class StaleWhileRevalidateCache:
     """
     SWR cache with background refresh - composable with any cache backend.
@@ -131,12 +131,12 @@ class StaleWhileRevalidateCache:
 
     @classmethod
     def cached(
-            cls,
-            key: str | Callable[..., str],
-            ttl: int,
-            stale_ttl: int = 0,
-            cache: CacheStorage | None = None,
-            enable_lock: bool = True
+        cls,
+        key: str | Callable[..., str],
+        ttl: int,
+        stale_ttl: int = 0,
+        cache: CacheStorage | None = None,
+        enable_lock: bool = True,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         SWR cache decorator.
@@ -181,9 +181,7 @@ class StaleWhileRevalidateCache:
                     result = func(*args, **kwargs)
                     now = time.time()
                     cache_entry = CacheEntry(
-                        value=result,
-                        fresh_until=now + ttl,
-                        created_at=now
+                        value=result, fresh_until=now + ttl, created_at=now
                     )
                     function_cache.set_entry(cache_key, cache_entry)
                     return result
@@ -201,20 +199,22 @@ class StaleWhileRevalidateCache:
                     result = func(*args, **kwargs)
                     now = time.time()
                     cache_entry = CacheEntry(
-                        value=result,
-                        fresh_until=now + ttl,
-                        created_at=now
+                        value=result, fresh_until=now + ttl, created_at=now
                     )
                     function_cache.set_entry(cache_key, cache_entry)
                     return result
 
                 # Stale but within grace period - return stale and refresh in background
-                logger.debug(f"Cache HIT (stale): {cache_key}, refreshing in background")
+                logger.debug(
+                    f"Cache HIT (stale): {cache_key}, refreshing in background"
+                )
 
                 # Try to acquire refresh lock
                 lock_key = f"{cache_key}:refresh_lock"
                 if enable_lock:
-                    acquired = function_cache.set_if_not_exists(lock_key, "1", stale_ttl or 10)
+                    acquired = function_cache.set_if_not_exists(
+                        lock_key, "1", stale_ttl or 10
+                    )
                     if not acquired:
                         return entry.value
 
@@ -224,9 +224,7 @@ class StaleWhileRevalidateCache:
                         new_value = func(*args, **kwargs)
                         now = time.time()
                         cache_entry = CacheEntry(
-                            value=new_value,
-                            fresh_until=now + ttl,
-                            created_at=now
+                            value=new_value, fresh_until=now + ttl, created_at=now
                         )
                         function_cache.set_entry(cache_key, cache_entry)
                         logger.debug(f"Background refresh complete: {cache_key}")
@@ -254,6 +252,7 @@ SWRCache = StaleWhileRevalidateCache
 # ============================================================================
 # Shared Scheduler - Singleton for all background jobs
 # ============================================================================
+
 
 class _SharedScheduler:
     """
@@ -298,6 +297,7 @@ class _SharedScheduler:
 # BGCache - Background cache loader decorator
 # ============================================================================
 
+
 class BackgroundCache:
     """
     Background cache with BackgroundScheduler for periodic data loading.
@@ -333,13 +333,13 @@ class BackgroundCache:
 
     @classmethod
     def register_loader(
-            cls,
-            cache_key: str,
-            interval_seconds: int,
-            ttl_seconds: int | None = None,
-            run_immediately: bool = True,
-            on_error: Callable[[Exception], None] | None = None,
-            cache: CacheStorage | None = None,
+        cls,
+        cache_key: str,
+        interval_seconds: int,
+        ttl_seconds: int | None = None,
+        run_immediately: bool = True,
+        on_error: Callable[[Exception], None] | None = None,
+        cache: CacheStorage | None = None,
     ) -> Callable[[Callable[[], T]], Callable[[], T]]:
         """
         Decorator to register a background data loader.
@@ -435,6 +435,7 @@ class BackgroundCache:
 
             # Return a wrapper that gets from cache
             if is_async:
+
                 async def async_wrapper() -> T:
                     """Get cached data or call loader if not available."""
                     value = loader_cache.get(cache_key)
@@ -451,6 +452,7 @@ class BackgroundCache:
 
                 return async_wrapper  # type: ignore
             else:
+
                 def sync_wrapper() -> T:
                     """Get cached data or call loader if not available."""
                     value = loader_cache.get(cache_key)
@@ -472,4 +474,3 @@ class BackgroundCache:
 
 # Alias for shorter usage
 BGCache = BackgroundCache
-

@@ -21,6 +21,7 @@ from src.advanced_caching import TTLCache
 # Simple Benchmark Utilities
 # ============================================================================
 
+
 def benchmark_function(func: Callable, runs: int = 1000, warmup: int = 100) -> dict:
     """
     Simple benchmark utility without external dependencies.
@@ -45,7 +46,7 @@ def benchmark_function(func: Callable, runs: int = 1000, warmup: int = 100) -> d
         "mean": statistics.mean(times),
         "median": statistics.median(times),
         "stdev": statistics.stdev(times) if len(times) > 1 else 0,
-        "runs": runs
+        "runs": runs,
     }
 
 
@@ -55,7 +56,9 @@ def print_result(name: str, result: dict, baseline: float = None):
     mean = result["mean"]
     stdev = result["stdev"]
 
-    print(f"  {name:25} {median:8.4f}ms  (mean: {mean:7.4f}ms, σ: {stdev:6.4f}ms)", end="")
+    print(
+        f"  {name:25} {median:8.4f}ms  (mean: {mean:7.4f}ms, σ: {stdev:6.4f}ms)", end=""
+    )
 
     if baseline and baseline > 0:
         speedup = baseline / median
@@ -72,14 +75,11 @@ def print_result(name: str, result: dict, baseline: float = None):
 # Test Functions - Simulate various workloads
 # ============================================================================
 
+
 def expensive_computation(x: int) -> dict:
     """Simulate 5ms expensive computation."""
     time.sleep(0.005)
-    return {
-        "input": x,
-        "result": x * x,
-        "computed_at": time.time()
-    }
+    return {"input": x, "result": x * x, "computed_at": time.time()}
 
 
 def database_query(user_id: int) -> dict:
@@ -89,7 +89,7 @@ def database_query(user_id: int) -> dict:
         "id": user_id,
         "name": f"User{user_id}",
         "email": f"user{user_id}@example.com",
-        "active": True
+        "active": True,
     }
 
 
@@ -99,7 +99,7 @@ def api_call(endpoint: str) -> dict:
     return {
         "endpoint": endpoint,
         "status": 200,
-        "data": {"message": f"Response from {endpoint}"}
+        "data": {"message": f"Response from {endpoint}"},
     }
 
 
@@ -107,11 +107,12 @@ def api_call(endpoint: str) -> dict:
 # Benchmark Scenarios
 # ============================================================================
 
+
 def benchmark_cold_cache():
     """Benchmark 1: Cold cache (first access) - measures cache miss + storage."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("BENCHMARK 1: Cold Cache Performance (First Access)")
-    print("="*80)
+    print("=" * 80)
     print("Measures: Cache miss + function execution + cache storage\n")
 
     # Baseline: No cache
@@ -128,6 +129,7 @@ def benchmark_cold_cache():
         return expensive_computation(x)
 
     counter = {"val": 0}
+
     def run_ttl():
         counter["val"] += 1
         with_ttl(counter["val"])  # Different key each time = cold cache
@@ -140,6 +142,7 @@ def benchmark_cold_cache():
         return expensive_computation(x)
 
     counter2 = {"val": 0}
+
     def run_miscutil():
         counter2["val"] += 1
         with_miscutil(counter2["val"])
@@ -154,15 +157,19 @@ def benchmark_cold_cache():
 
     print(f"\n📊 Cold Cache Overhead:")
     print(f"  Baseline:        {baseline:.3f}ms")
-    print(f"  TTLCache:        {ttl_result['median']:.3f}ms (+{ttl_result['median'] - baseline:.3f}ms, {(ttl_result['median']/baseline - 1)*100:.1f}% overhead)")
-    print(f"  miscutil.cached: {misc_result['median']:.3f}ms (+{misc_result['median'] - baseline:.3f}ms, {(misc_result['median']/baseline - 1)*100:.1f}% overhead)")
+    print(
+        f"  TTLCache:        {ttl_result['median']:.3f}ms (+{ttl_result['median'] - baseline:.3f}ms, {(ttl_result['median'] / baseline - 1) * 100:.1f}% overhead)"
+    )
+    print(
+        f"  miscutil.cached: {misc_result['median']:.3f}ms (+{misc_result['median'] - baseline:.3f}ms, {(misc_result['median'] / baseline - 1) * 100:.1f}% overhead)"
+    )
 
 
 def benchmark_hot_cache():
     """Benchmark 2: Hot cache (repeated access) - measures pure cache hit speed."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("BENCHMARK 2: Hot Cache Performance (Repeated Access)")
-    print("="*80)
+    print("=" * 80)
     print("Measures: Pure cache hit speed (best case scenario)\n")
 
     # Baseline for reference
@@ -217,15 +224,21 @@ def benchmark_hot_cache():
     print_result("miscutil.cached (hot)", misc_result, baseline)
 
     print(f"\n🚀 Hot Cache Speedup:")
-    print(f"  TTLCache:        {ttl_result['median']:.4f}ms ({baseline/ttl_result['median']:>8,.0f}x faster)")
-    print(f"  SWRCache:        {swr_result['median']:.4f}ms ({baseline/swr_result['median']:>8,.0f}x faster)")
-    print(f"  miscutil.cached: {misc_result['median']:.4f}ms ({baseline/misc_result['median']:>8,.0f}x faster)")
+    print(
+        f"  TTLCache:        {ttl_result['median']:.4f}ms ({baseline / ttl_result['median']:>8,.0f}x faster)"
+    )
+    print(
+        f"  SWRCache:        {swr_result['median']:.4f}ms ({baseline / swr_result['median']:>8,.0f}x faster)"
+    )
+    print(
+        f"  miscutil.cached: {misc_result['median']:.4f}ms ({baseline / misc_result['median']:>8,.0f}x faster)"
+    )
 
     # Find winner
     times = [
-        ("TTLCache", ttl_result['median']),
-        ("SWRCache", swr_result['median']),
-        ("miscutil.cached", misc_result['median'])
+        ("TTLCache", ttl_result["median"]),
+        ("SWRCache", swr_result["median"]),
+        ("miscutil.cached", misc_result["median"]),
     ]
     times.sort(key=lambda x: x[1])
     print(f"\n🏆 Fastest: {times[0][0]} ({times[0][1]:.4f}ms)")
@@ -233,9 +246,9 @@ def benchmark_hot_cache():
 
 def benchmark_varying_keys():
     """Benchmark 3: Varying keys - realistic workload with mix of hits/misses."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("BENCHMARK 3: Varying Keys (Realistic Workload)")
-    print("="*80)
+    print("=" * 80)
     print("Measures: Mixed cache hits/misses with 100 different keys\n")
 
     # Baseline
@@ -282,15 +295,19 @@ def benchmark_varying_keys():
 
     print(f"\n📈 Varying Keys Performance:")
     print(f"  Baseline:        {baseline:.2f}ms")
-    print(f"  TTLCache:        {ttl_result['median']:.2f}ms ({baseline/ttl_result['median']:.1f}x faster)")
-    print(f"  miscutil.cached: {misc_result['median']:.2f}ms ({baseline/misc_result['median']:.1f}x faster)")
+    print(
+        f"  TTLCache:        {ttl_result['median']:.2f}ms ({baseline / ttl_result['median']:.1f}x faster)"
+    )
+    print(
+        f"  miscutil.cached: {misc_result['median']:.2f}ms ({baseline / misc_result['median']:.1f}x faster)"
+    )
 
 
 def benchmark_background_loading():
     """Benchmark 4: Background loading vs on-demand caching."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("BENCHMARK 4: Background Loading vs On-Demand")
-    print("="*80)
+    print("=" * 80)
     print("Measures: BGCache (pre-loaded) vs TTLCache (on-demand)\n")
 
     def heavy_load():
@@ -351,18 +368,24 @@ def benchmark_background_loading():
 
     print(f"\n⚡ Background vs On-Demand:")
     print(f"  Baseline:        {baseline:.2f}ms")
-    print(f"  BGCache:         {bg_result['median']:.4f}ms ({baseline/bg_result['median']:>8,.0f}x faster) 🏆 Pre-loaded!")
-    print(f"  TTLCache:        {ttl_result['median']:.4f}ms ({baseline/ttl_result['median']:>8,.0f}x faster)")
-    print(f"  miscutil.cached: {misc_result['median']:.4f}ms ({baseline/misc_result['median']:>8,.0f}x faster)")
+    print(
+        f"  BGCache:         {bg_result['median']:.4f}ms ({baseline / bg_result['median']:>8,.0f}x faster) 🏆 Pre-loaded!"
+    )
+    print(
+        f"  TTLCache:        {ttl_result['median']:.4f}ms ({baseline / ttl_result['median']:>8,.0f}x faster)"
+    )
+    print(
+        f"  miscutil.cached: {misc_result['median']:.4f}ms ({baseline / misc_result['median']:>8,.0f}x faster)"
+    )
 
     BGCache.shutdown()
 
 
 def benchmark_memory_usage():
     """Benchmark 5: Memory efficiency comparison."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("BENCHMARK 5: Memory Efficiency")
-    print("="*80)
+    print("=" * 80)
     print("Measures: Cache with custom backend vs default\n")
 
     # Custom lightweight cache
@@ -427,14 +450,15 @@ def benchmark_memory_usage():
 # Main
 # ============================================================================
 
+
 def main():
     """Run all benchmarks."""
-    print("\n" + "█"*80)
-    print("█" + " "*78 + "█")
+    print("\n" + "█" * 80)
+    print("█" + " " * 78 + "█")
     print("█" + "  COMPREHENSIVE DECORATOR BENCHMARK SUITE".center(78) + "█")
     print("█" + "  TTLCache vs SWRCache vs BGCache vs miscutil.cached".center(78) + "█")
-    print("█" + " "*78 + "█")
-    print("█"*80)
+    print("█" + " " * 78 + "█")
+    print("█" * 80)
 
     # Run all benchmarks
     benchmark_cold_cache()
@@ -444,19 +468,17 @@ def main():
     benchmark_memory_usage()
 
     # Final summary
-    print("\n" + "█"*80)
-    print("█" + " "*78 + "█")
+    print("\n" + "█" * 80)
+    print("█" + " " * 78 + "█")
     print("█" + "  BENCHMARK SUMMARY".center(78) + "█")
-    print("█" + " "*78 + "█")
-    print("█"*80)
+    print("█" + " " * 78 + "█")
+    print("█" * 80)
 
-
-
-    print("\n" + "█"*80)
-    print("█" + " "*78 + "█")
+    print("\n" + "█" * 80)
+    print("█" + " " * 78 + "█")
     print("█" + "  ✅ BENCHMARK COMPLETE".center(78) + "█")
-    print("█" + " "*78 + "█")
-    print("█"*80 + "\n")
+    print("█" + " " * 78 + "█")
+    print("█" * 80 + "\n")
 
 
 def test_benchmark():
@@ -466,4 +488,3 @@ def test_benchmark():
 
 if __name__ == "__main__":
     main()
-

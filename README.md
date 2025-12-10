@@ -28,10 +28,10 @@ Tested with 10ms simulated work per operation (e.g., database query, API call):
 Strategy               Median Time    vs Baseline    Use Case
 ─────────────────────────────────────────────────────────────────
 No Cache (baseline)    12.51 ms       1x             Direct calls
-TTLCache               0.0010 ms      12,000x ⚡      General caching
-SWRCache               0.0014 ms      9,100x ⚡       Stale-OK scenarios
-InMemCache (direct)    0.0006 ms      20,000x ⚡      Manual caching
-BGCache                0.0003 ms      37,000x ⚡      Pre-loaded data
+TTLCache               0.0010 ms      12,000x        General caching
+SWRCache               0.0014 ms      9,100x         Stale-OK scenarios
+InMemCache (direct)    0.0006 ms      20,000x        Manual caching
+BGCache                0.0003 ms      37,000x        Pre-loaded data
 ```
 
 ### Mixed Workload (50% hit rate, 100 distinct keys)
@@ -41,8 +41,8 @@ BGCache                0.0003 ms      37,000x ⚡      Pre-loaded data
 Strategy               Median Time    vs Baseline
 ─────────────────────────────────────────────────
 No Cache               12.51 ms       1x
-TTLCache               0.0008 ms      15,000x ⚡
-SWRCache               0.0017 ms      7,300x ⚡
+TTLCache               0.0008 ms      15,000x 
+SWRCache               0.0017 ms      7,300x 
 ```
 
 ### Background Loading (50ms heavy operation)
@@ -52,8 +52,8 @@ SWRCache               0.0017 ms      7,300x ⚡
 Strategy               Median Time    vs Baseline
 ─────────────────────────────────────────────────
 No Cache               55.01 ms       1x
-BGCache (pre-loaded)   0.0005 ms      119,850x ⚡
-TTLCache (hot)         0.0004 ms      146,715x ⚡
+BGCache (pre-loaded)   0.0005 ms      119,850x 
+TTLCache (hot)         0.0004 ms      146,715x 
 ```
 
 ## Installation

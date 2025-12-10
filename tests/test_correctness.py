@@ -2,6 +2,7 @@
 Fast and reliable unit tests for caching decorators.
 Tests TTLCache, SWRCache, and BGCache functionality.
 """
+
 import pytest
 import time
 
@@ -89,6 +90,7 @@ class TestTTLCache:
 
     def test_callable_key_function(self):
         """Test TTLCache with callable key function."""
+
         @TTLCache.cached(key=lambda user_id: f"user:{user_id}", ttl=60)
         def get_user(user_id):
             return {"id": user_id}
@@ -227,7 +229,9 @@ class TestBGCache:
         """Test sync loader without immediate execution."""
         call_count = {"count": 0}
 
-        @BGCache.register_loader("no_immediate", interval_seconds=10, run_immediately=False)
+        @BGCache.register_loader(
+            "no_immediate", interval_seconds=10, run_immediately=False
+        )
         def load_data():
             call_count["count"] += 1
             return {"value": call_count["count"]}
@@ -246,7 +250,9 @@ class TestBGCache:
         """Test BGCache using custom cache backend."""
         custom_cache = InMemCache()
 
-        @BGCache.register_loader("custom", interval_seconds=10, run_immediately=True, cache=custom_cache)
+        @BGCache.register_loader(
+            "custom", interval_seconds=10, run_immediately=True, cache=custom_cache
+        )
         def load_data():
             return {"custom": True}
 
@@ -293,7 +299,7 @@ class TestBGCache:
             "error_test",
             interval_seconds=10,
             run_immediately=True,
-            on_error=error_handler
+            on_error=error_handler,
         )
         def load_data():
             raise ValueError("Test error")
@@ -370,7 +376,7 @@ class TestCachePerformance:
 
         # Should be very fast (<1ms per call on average)
         avg_time = duration / 1000
-        assert avg_time < 0.001, f"Cache hit too slow: {avg_time*1000:.3f}ms"
+        assert avg_time < 0.001, f"Cache hit too slow: {avg_time * 1000:.3f}ms"
         assert result == {"data": "value"}
 
     def test_ttl_cache_hit_speed(self):
@@ -391,9 +397,8 @@ class TestCachePerformance:
         duration = time.perf_counter() - start
 
         avg_time = duration / 1000
-        assert avg_time < 0.0005, f"TTL cache hit too slow: {avg_time*1000:.3f}ms"
+        assert avg_time < 0.0005, f"TTL cache hit too slow: {avg_time * 1000:.3f}ms"
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
