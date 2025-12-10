@@ -15,6 +15,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redis cluster support
 - DynamoDB backend example
 
+## [0.1.3] - 2025-12-10
+
+### Changed
+- Defined clear semantics for `ttl` and `interval_seconds` when set to zero:
+  - `TTLCache.cached(..., ttl <= 0)` now acts as a transparent decorator (no caching); the wrapped function is always executed.
+  - `SWRCache.cached(..., ttl <= 0)` disables SWR and caching entirely; calls go straight to the wrapped function.
+  - `BGCache.register_loader(..., interval_seconds <= 0 or ttl <= 0)` disables background scheduling and caching; the loader is called directly on every invocation.
+- Simplified logging strategy to eliminate overhead on hot paths while preserving useful diagnostics:
+  - Removed all debug/info logging from cache hit/miss and normal code paths.
+  - Retained and refined error logging only for exceptional situations.
+
+### Added
+- Error-only logging with structured messages:
+  - `SWRCache` logs using `logger.exception` when a background refresh job fails, including the cache key and full traceback.
+  - `BGCache` refresh jobs:
+    - Invoke the user-provided `on_error` handler first when loader failures occur.
+    - Log handler failures with `"BGCache error handler failed for key %r"` including the key and traceback.
+    - Log uncaught loader errors with `"BGCache refresh job failed for key %r"` when no `on_error` is supplied.
+- New tests ensuring that:
+  - `ttl == 0` for TTLCache and SWRCache disables caching (each call executes the function and increments a counter).
+  - `interval_seconds == 0` or `ttl == 0` for BGCache disables background loading and caching (each call executes the loader and increments a counter).
+
 ## [0.1.2] - 2025-12-10
 
 ### Changed
@@ -52,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `storage.py` coverage improved to ~74%.
 - Ensured all tests pass under the documented `pyproject.toml` configuration.
 
-[Unreleased]: https://github.com/namshiv2/advanced_caching/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/namshiv2/advanced_caching/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/namshiv2/advanced_caching/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/namshiv2/advanced_caching/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/namshiv2/advanced_caching/releases/tag/v0.1.1
 
