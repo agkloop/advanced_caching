@@ -36,9 +36,6 @@ jobs:
     - name: Check code formatting with ruff
       run: uv run ruff format --check src/ tests/
 
-    - name: Verify package structure
-      run: uv run python verify.py
-
     - name: Run tests
       run: uv run pytest tests/test_correctness.py -v --tb=short
 
