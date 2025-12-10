@@ -36,7 +36,7 @@ jobs:
     - name: Check build
       run: |
         uv pip install twine
-        twine check dist/*
+        uv run twine check dist/*
 
   publish:
     needs: build
