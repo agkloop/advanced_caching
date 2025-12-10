@@ -88,16 +88,6 @@ user = await get_user_async(42)
 ```
 
 ## Benchmarks
-
-**Performance Comparison** (10ms baseline operation):
-
-| Strategy | Time | Speedup |
-|----------|------|---------|
-| No Cache | 12.51 ms | 1x |
-| TTLCache | 0.0010 ms | 12,000x  |
-| SWRCache | 0.0014 ms | 9,100x  |
-| BGCache | 0.0003 ms | 37,000x  |
-
 Full benchmarks available in `tests/benchmark.py`.
 
 ## API Reference

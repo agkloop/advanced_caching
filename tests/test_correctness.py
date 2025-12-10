@@ -606,5 +606,65 @@ class TestDecoratorKeyEdgeCases:
         assert calls["n"] == 1
 
 
+class TestNoCachingWhenZero:
+    """Ensure ttl/interval_seconds == 0 disables caching/background behavior."""
+
+    def test_ttlcache_ttl_zero_disables_caching(self):
+        calls = {"n": 0}
+
+        @TTLCache.cached("user:{}", ttl=0)
+        def get_user(user_id: int) -> int:
+            calls["n"] += 1
+            return calls["n"]
+
+        # Each call should invoke the function (no caching)
+        assert get_user(1) == 1
+        assert get_user(1) == 2
+        assert get_user(1) == 3
+        assert calls["n"] == 3
+
+    def test_swrcache_ttl_zero_disables_caching(self):
+        calls = {"n": 0}
+
+        @SWRCache.cached("data:{}", ttl=0, stale_ttl=10)
+        def get_data(key: str) -> int:
+            calls["n"] += 1
+            return calls["n"]
+
+        # Each call should invoke the function (no SWR behavior)
+        assert get_data("k") == 1
+        assert get_data("k") == 2
+        assert get_data("k") == 3
+        assert calls["n"] == 3
+
+    def test_bgcache_interval_zero_disables_background_and_cache(self):
+        calls = {"n": 0}
+
+        @BGCache.register_loader(key="no_bg", interval_seconds=0, ttl=None)
+        def load_data() -> int:
+            calls["n"] += 1
+            return calls["n"]
+
+        # No background scheduler, no caching: each call increments
+        assert load_data() == 1
+        assert load_data() == 2
+        assert load_data() == 3
+        assert calls["n"] == 3
+
+    def test_bgcache_ttl_zero_disables_background_and_cache(self):
+        calls = {"n": 0}
+
+        @BGCache.register_loader(key="no_bg_ttl", interval_seconds=10, ttl=0)
+        def load_data() -> int:
+            calls["n"] += 1
+            return calls["n"]
+
+        # Because ttl == 0, wrapper should bypass cache and scheduler
+        assert load_data() == 1
+        assert load_data() == 2
+        assert load_data() == 3
+        assert calls["n"] == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

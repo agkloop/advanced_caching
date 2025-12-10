@@ -20,9 +20,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from .storage import InMemCache, CacheEntry, CacheStorage
 
-logger = logging.getLogger(__name__)
-
 T = TypeVar("T")
+
+# Minimal logger used only for error reporting (no debug/info on hot paths)
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -81,6 +82,9 @@ class SimpleTTLCache:
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             def wrapper(*args, **kwargs) -> T:
+                # If ttl is 0 or negative, disable caching and call through
+                if ttl <= 0:
+                    return func(*args, **kwargs)
                 # Generate cache key
                 if callable(key):
                     cache_key = key(*args, **kwargs)
@@ -178,6 +182,9 @@ class StaleWhileRevalidateCache:
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             def wrapper(*args, **kwargs) -> T:
+                # If ttl is 0 or negative, disable caching and SWR behavior
+                if ttl <= 0:
+                    return func(*args, **kwargs)
                 # Generate cache key
                 if callable(key):
                     # Key function is responsible for handling args/defaults
@@ -212,7 +219,6 @@ class StaleWhileRevalidateCache:
 
                 if entry is None:
                     # Cache miss - fetch now
-                    logger.debug(f"Cache MISS: {cache_key}")
                     result = func(*args, **kwargs)
                     now = time.time()
                     cache_entry = CacheEntry(
@@ -221,16 +227,12 @@ class StaleWhileRevalidateCache:
                     function_cache.set_entry(cache_key, cache_entry)
                     return result
 
-                # Check if fresh (within TTL)
                 if entry.is_fresh():
-                    logger.debug(f"Cache HIT (fresh): {cache_key}")
                     return entry.value
 
-                # Stale - check if still within stale period
                 age = entry.age()
                 if age > (ttl + stale_ttl):
                     # Too stale, fetch now
-                    logger.debug(f"Cache HIT (too stale): {cache_key}, age={age:.1f}s")
                     result = func(*args, **kwargs)
                     now = time.time()
                     cache_entry = CacheEntry(
@@ -240,10 +242,6 @@ class StaleWhileRevalidateCache:
                     return result
 
                 # Stale but within grace period - return stale and refresh in background
-                logger.debug(
-                    f"Cache HIT (stale): {cache_key}, refreshing in background"
-                )
-
                 # Try to acquire refresh lock
                 lock_key = f"{cache_key}:refresh_lock"
                 if enable_lock:
@@ -262,9 +260,11 @@ class StaleWhileRevalidateCache:
                             value=new_value, fresh_until=now + ttl, created_at=now
                         )
                         function_cache.set_entry(cache_key, cache_entry)
-                        logger.debug(f"Background refresh complete: {cache_key}")
-                    except Exception as e:
-                        logger.error(f"Background refresh failed for {cache_key}: {e}")
+                    except Exception:
+                        # Log background refresh failures but never raise
+                        logger.exception(
+                            "SWR background refresh failed for key %r", cache_key
+                        )
 
                 thread = threading.Thread(target=refresh_job, daemon=True)
                 thread.start()
@@ -315,7 +315,6 @@ class _SharedScheduler:
             if not cls._started:
                 cls.get_scheduler().start()
                 cls._started = True
-                logger.info("Shared BackgroundScheduler started")
 
     @classmethod
     def shutdown(cls, wait: bool = True) -> None:
@@ -325,7 +324,6 @@ class _SharedScheduler:
                 cls._scheduler.shutdown(wait=wait)
                 cls._started = False
                 cls._scheduler = None
-                logger.info("Shared BackgroundScheduler stopped")
 
 
 # ============================================================================
@@ -390,8 +388,13 @@ class BackgroundCache:
             Decorated function that returns cached data (sync or async).
         """
         cache_key = key
-        if ttl is None:
+        # If interval_seconds <= 0 or ttl == 0, disable background scheduling and caching.
+        if interval_seconds <= 0:
+            interval_seconds = 0
+        if ttl is None and interval_seconds > 0:
             ttl = interval_seconds * 2
+        if ttl is None:
+            ttl = 0
 
         # Create a dedicated cache instance for this loader
         loader_cache = cache if cache is not None else InMemCache()
@@ -400,16 +403,38 @@ class BackgroundCache:
             # Detect if function is async
             is_async = asyncio.iscoroutinefunction(loader_func)
 
+            # If no scheduling/caching is desired, just wrap the function and call through
+            if interval_seconds <= 0 or ttl <= 0:
+                if is_async:
+
+                    async def async_wrapper() -> T:
+                        return await loader_func()
+
+                    async_wrapper.__wrapped__ = loader_func  # type: ignore
+                    async_wrapper.__name__ = loader_func.__name__  # type: ignore
+                    async_wrapper.__doc__ = loader_func.__doc__  # type: ignore
+                    async_wrapper._cache = loader_cache  # type: ignore
+                    async_wrapper._cache_key = cache_key  # type: ignore
+
+                    return async_wrapper  # type: ignore
+                else:
+
+                    def sync_wrapper() -> T:
+                        return loader_func()
+
+                    sync_wrapper.__wrapped__ = loader_func  # type: ignore
+                    sync_wrapper.__name__ = loader_func.__name__  # type: ignore
+                    sync_wrapper.__doc__ = loader_func.__doc__  # type: ignore
+                    sync_wrapper._cache = loader_cache  # type: ignore
+                    sync_wrapper._cache_key = cache_key  # type: ignore
+
+                    return sync_wrapper  # type: ignore
+
             # Create wrapper that loads and caches
             def refresh_job():
                 """Job that runs periodically to refresh the cache."""
                 try:
-                    logger.debug(f"Refreshing cache key: {cache_key}")
-                    start = time.time()
-
-                    # Call function (async or sync)
                     if is_async:
-                        # Run async function in new event loop
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
@@ -419,19 +444,22 @@ class BackgroundCache:
                     else:
                         data = loader_func()
 
-                    duration = time.time() - start
-
                     loader_cache.set(cache_key, data, ttl)
-                    logger.info(
-                        f"Refreshed {cache_key} successfully in {duration:.3f}s"
-                    )
                 except Exception as e:
-                    logger.error(f"Failed to refresh {cache_key}: {e}", exc_info=True)
+                    # User-provided error handler gets first chance
                     if on_error:
                         try:
                             on_error(e)
-                        except Exception as err:
-                            logger.error(f"Error handler failed: {err}")
+                        except Exception:
+                            # Avoid user handler breaking the scheduler
+                            logger.exception(
+                                "BGCache error handler failed for key %r", cache_key
+                            )
+                    else:
+                        # Log uncaught loader errors for visibility
+                        logger.exception(
+                            "BGCache refresh job failed for key %r", cache_key
+                        )
 
             # Get shared scheduler
             scheduler = _SharedScheduler.get_scheduler()
