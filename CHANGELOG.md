@@ -47,5 +47,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Flexible:** Multiple storage backends, composable decorators, custom backend support
 - **Production-Ready:** Comprehensive tests, benchmarks, and documentation
 
-[0.1.1]: https://github.com/namshiv2/advanced_caching/releases/tag/v0.1.0
+[0.1.1]: https://github.com/namshiv2/advanced_caching/releases/tag/v0.1.1
 
