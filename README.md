@@ -102,24 +102,107 @@ Full benchmarks available in `tests/benchmark.py`.
 
 ## API Reference
 
+### Key templates & custom keys
+
+All caching decorators share the same key concept:
+
+- `key: str` – String template or literal
+- `key: Callable[..., str]` – Function that returns a string key
+
+Supported patterns:
+
+1. **Positional placeholder** – first positional argument:
+
+   ```python
+   @TTLCache.cached("user:{}", ttl=60)
+   def get_user(user_id: int):
+       ...
+
+   get_user(42)  # key -> "user:42"
+   ```
+
+2. **Named placeholder** – keyword arguments by name:
+
+   ```python
+   @TTLCache.cached("user:{user_id}", ttl=60)
+   def get_user(*, user_id: int):
+       ...
+
+   get_user(user_id=42)  # key -> "user:42"
+   ```
+
+3. **Named with extra kwargs** – only the named part is used for the key:
+
+   ```python
+   @SWRCache.cached("i18n:{lang}", ttl=60, stale_ttl=30)
+   def load_i18n(lang: str, region: str | None = None):
+       ...
+
+   load_i18n(lang="en", region="US")  # key -> "i18n:en"
+   ```
+
+4. **Default arguments + robust key lambda** – recommended for complex/default cases:
+
+   ```python
+   @SWRCache.cached(
+       key=lambda *a, **k: f"i18n:all:{k.get('lang', a[0] if a else 'en')}",
+       ttl=60,
+       stale_ttl=30,
+   )
+   def load_all(lang: str = "en") -> dict:
+       print(f"Loading i18n for {lang}")
+       return {"hello": f"Hello in {lang}"}
+
+   load_all()           # key -> "i18n:all:en"
+   load_all("en")      # key -> "i18n:all:en"
+   load_all(lang="en") # key -> "i18n:all:en"
+   # Body runs once, subsequent calls are cached
+   ```
+
+---
+
 ### TTLCache.cached(key, ttl, cache=None)
 Simple time-based cache with configurable TTL.
 
+**Signature:**
+```python
+TTLCache.cached(
+    key: str | Callable[..., str],
+    ttl: int,
+    cache: CacheStorage | None = None,
+) -> Callable
+```
+
 **Parameters:**
-- `key` (str | callable): Cache key or function. String `"user:{}"` formats with first arg
+- `key` (str | callable): Cache key template or generator function
 - `ttl` (int): Time-to-live in seconds
 - `cache` (CacheStorage): Optional custom backend (defaults to InMemCache)
 
-**Example:**
+**Examples:**
+
+Positional key:
 ```python
-@TTLCache.cached("user:{}", ttl=300)
-def get_user(user_id):
+@TTLCache.cached("user:{},", ttl=300)
+def get_user(user_id: int):
     return db.fetch(user_id)
 
-# Custom backend
-@TTLCache.cached("data:{}", ttl=60, cache=redis_cache)
-def get_data(data_id):
-    return api.fetch(data_id)
+get_user(42)  # key -> "user:42"
+```
+
+Named key:
+```python
+@TTLCache.cached("user:{user_id}", ttl=300)
+def get_user(*, user_id: int):
+    return db.fetch(user_id)
+
+get_user(user_id=42)  # key -> "user:42"
+```
+
+Custom key function:
+```python
+@TTLCache.cached(key=lambda *a, **k: f"user:{k.get('user_id', a[0])}", ttl=300)
+def get_user(user_id: int = 0):
+    return db.fetch(user_id)
 ```
 
 ---
@@ -127,54 +210,125 @@ def get_data(data_id):
 ### SWRCache.cached(key, ttl, stale_ttl=0, cache=None, enable_lock=True)
 Serve stale data instantly while refreshing in background.
 
+**Signature:**
+```python
+SWRCache.cached(
+    key: str | Callable[..., str],
+    ttl: int,
+    stale_ttl: int = 0,
+    cache: CacheStorage | None = None,
+    enable_lock: bool = True,
+) -> Callable
+```
+
 **Parameters:**
-- `key` (str | callable): Cache key (same format as TTLCache)
+- `key` (str | callable): Cache key (same patterns as TTLCache)
 - `ttl` (int): Fresh data TTL in seconds
 - `stale_ttl` (int): Grace period to serve stale data while refreshing
 - `cache` (CacheStorage): Optional custom backend
 - `enable_lock` (bool): Prevent thundering herd (default: True)
 
-**Example:**
+**Examples:**
+
+Basic SWR with positional key:
 ```python
 @SWRCache.cached("product:{}", ttl=60, stale_ttl=30)
-def get_product(product_id):
+def get_product(product_id: int):
     return api.fetch_product(product_id)
 
-# Returns immediately with fresh or stale data
-# Never blocks on refresh
+get_product(1)  # key -> "product:1"
+```
+
+Named key with kwargs:
+```python
+@SWRCache.cached("i18n:{lang}", ttl=60, stale_ttl=30)
+def load_i18n(*, lang: str = "en") -> dict:
+    return {"hello": f"Hello in {lang}"}
+
+load_i18n(lang="en")  # key -> "i18n:en"
+```
+
+Default arg + key lambda (robust):
+```python
+@SWRCache.cached(
+    key=lambda *a, **k: f"i18n:all:{k.get('lang', a[0] if a else 'en')}",
+    ttl=60,
+    stale_ttl=30,
+)
+def load_all(lang: str = "en") -> dict:
+    return {"hello": f"Hello in {lang}"}
 ```
 
 ---
 
-### BGCache.register_loader(cache_key, interval_seconds, ttl_seconds=None, run_immediately=True, on_error=None, cache=None)
+### BGCache.register_loader(key, interval_seconds, ttl=None, run_immediately=True, on_error=None, cache=None)
 Pre-load expensive data with periodic refresh.
 
+**Signature:**
+```python
+BGCache.register_loader(
+    key: str,
+    interval_seconds: int,
+    ttl: int | None = None,
+    run_immediately: bool = True,
+    on_error: Callable[[Exception], None] | None = None,
+    cache: CacheStorage | None = None,
+) -> Callable
+```
+
 **Parameters:**
-- `cache_key` (str): Unique cache key (no formatting)
+- `key` (str): Unique cache key (no formatting, fixed string)
 - `interval_seconds` (int): Refresh interval in seconds
-- `ttl_seconds` (int): Cache TTL (defaults to interval_seconds × 2)
-- `run_immediately` (bool): Load on registration (default: True)
-- `on_error` (callable): Error handler function
+- `ttl` (int | None): Cache TTL (defaults to 2 × interval_seconds when None)
+- `run_immediately` (bool): Load once at registration (default: True)
+- `on_error` (callable): Error handler function `(Exception) -> None`
 - `cache` (CacheStorage): Optional custom backend
 
-**Example:**
-```python
-@BGCache.register_loader("inventory", interval_seconds=300)
-def load_inventory():
-    return warehouse_api.get_items()
+**Examples:**
 
-# Async support
-@BGCache.register_loader("products", interval_seconds=300)
-async def load_products():
+Sync loader:
+```python
+from advanced_caching import BGCache
+
+@BGCache.register_loader(key="inventory", interval_seconds=300, ttl=900)
+def load_inventory() -> list[dict]:
+    return warehouse_api.get_all_items()
+
+# Later
+items = load_inventory()  # instant access to cached data
+```
+
+Async loader:
+```python
+@BGCache.register_loader(key="products", interval_seconds=300, ttl=900)
+async def load_products() -> list[dict]:
     return await api.fetch_products()
 
-# With error handling
-@BGCache.register_loader("config", interval_seconds=60, on_error=logger.error)
-def load_config():
-    return settings.fetch()
+products = await load_products()  # returns cached list
+```
 
-# Shutdown scheduler when done
-BGCache.shutdown()
+With error handling:
+```python
+errors: list[Exception] = []
+
+def on_error(exc: Exception) -> None:
+    errors.append(exc)
+
+@BGCache.register_loader(
+    key="unstable",
+    interval_seconds=60,
+    run_immediately=True,
+    on_error=on_error,
+)
+def maybe_fails() -> dict:
+    raise RuntimeError("boom")
+
+# errors list will contain the exception from background job
+```
+
+Shutdown scheduler when done:
+```python
+BGCache.shutdown(wait=True)
 ```
 
 ---
@@ -455,5 +609,4 @@ MIT License – See [LICENSE](LICENSE) for details.
 - [ ] DynamoDB backend example
 
 ---
-
 

@@ -15,6 +15,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redis cluster support
 - DynamoDB backend example
 
+## [0.1.2] - 2025-12-10
+
+### Changed
+- Unified public decorator arguments to use consistent names:
+  - `TTLCache.cached(key, ttl, cache=None)`
+  - `SWRCache.cached(key, ttl, stale_ttl=0, cache=None, enable_lock=True)`
+  - `BGCache.register_loader(key, interval_seconds, ttl=None, run_immediately=True, on_error=None, cache=None)`
+- Documented and clarified key template behavior across decorators:
+  - Positional templates: `"user:{}"` → first positional argument
+  - Named templates: `"user:{user_id}"`, `"i18n:{lang}"` → keyword arguments by name
+  - Robust key lambdas for default arguments and complex keys.
+- Updated README API reference to match current behavior and naming, with:
+  - New "Key templates & custom keys" section.
+  - Richer examples for TTLCache, SWRCache, and BGCache (sync + async).
+  - Clear explanation of how `key`, `ttl`, `stale_ttl`, and `interval_seconds` interact.
+
+### Added
+- New edge-case tests for:
+  - `InMemCache` (cleanup, lock property, `set_if_not_exists` with expired entries).
+  - `HybridCache` (constructor validation, basic get/set/exists/delete behavior).
+  - `validate_cache_storage()` failure path.
+  - Decorator key-generation edge paths:
+    - Static keys without placeholders.
+    - No-arg functions with static keys.
+    - Templates with positional placeholders but only kwargs passed.
+    - Templates with missing named placeholders falling back to raw keys.
+- Additional key-template tests for TTLCache and SWRCache:
+  - Positional vs named templates.
+  - Extra kwargs with named templates.
+  - Default-argument handling via `key=lambda *a, **k: ...`.
+
+### Quality
+- Increased test coverage from ~70% to ~82%:
+  - `decorators.py` coverage improved to ~87%.
+  - `storage.py` coverage improved to ~74%.
+- Ensured all tests pass under the documented `pyproject.toml` configuration.
+
+[Unreleased]: https://github.com/namshiv2/advanced_caching/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/namshiv2/advanced_caching/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/namshiv2/advanced_caching/releases/tag/v0.1.1
+
 ## [0.1.1] - 2025-12-10
 
 ### Added
@@ -48,4 +89,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Production-Ready:** Comprehensive tests, benchmarks, and documentation
 
 [0.1.1]: https://github.com/namshiv2/advanced_caching/releases/tag/v0.1.1
-

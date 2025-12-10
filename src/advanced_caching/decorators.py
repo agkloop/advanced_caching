@@ -35,15 +35,23 @@ class SimpleTTLCache:
     Simple TTL cache decorator (singleton pattern).
     Each decorated function gets its own cache instance.
 
-    Example:
+    Key templates (high-performance, simple):
+    - Positional placeholder: "user:{}" → first positional arg
+    - Named placeholder: "user:{user_id}" → keyword arg `user_id`
+    - Custom function: key=lambda *a, **k: ...
+
+    Examples:
         @TTLCache.cached("user:{}", ttl=60)
         def get_user(user_id):
             return db.fetch_user(user_id)
 
-        # With custom cache backend
-        @TTLCache.cached("user:{}", ttl=60, cache=redis_cache)
-        def get_user(user_id):
+        @TTLCache.cached("user:{user_id}", ttl=60)
+        def get_user(*, user_id):
             return db.fetch_user(user_id)
+
+        @TTLCache.cached(key=lambda *, lang="en": f"i18n:{lang}", ttl=60)
+        def load_i18n(lang: str = "en"):
+            ...
     """
 
     @classmethod
@@ -77,11 +85,18 @@ class SimpleTTLCache:
                 if callable(key):
                     cache_key = key(*args, **kwargs)
                 else:
-                    # Simple format string with first arg
-                    if args:
-                        cache_key = key.format(args[0]) if "{" in key else key
+                    if "{" in key:
+                        if args:
+                            cache_key = key.format(args[0])
+                        elif kwargs:
+                            try:
+                                cache_key = key.format(**kwargs)
+                            except (KeyError, IndexError):
+                                cache_key = key
+                        else:
+                            cache_key = key
                     else:
-                        cache_key = key.format(**kwargs) if "{" in key else key
+                        cache_key = key
 
                 # Try cache first
                 cached_value = function_cache.get(cache_key)
@@ -165,12 +180,32 @@ class StaleWhileRevalidateCache:
             def wrapper(*args, **kwargs) -> T:
                 # Generate cache key
                 if callable(key):
+                    # Key function is responsible for handling args/defaults
                     cache_key = key(*args, **kwargs)
                 else:
-                    if args:
-                        cache_key = key.format(args[0]) if "{" in key else key
+                    if "{" in key:
+                        if args:
+                            # Use first positional arg for simple templates like "i18n:{}"
+                            cache_key = key.format(args[0])
+                        elif kwargs:
+                            # Prefer named formatting for templates like "i18n:{lang}"
+                            try:
+                                cache_key = key.format(**kwargs)
+                            except (KeyError, IndexError):
+                                # Fallback: if there is a single kwarg and template uses '{}'
+                                if len(kwargs) == 1:
+                                    only_value = next(iter(kwargs.values()))
+                                    try:
+                                        cache_key = key.format(only_value)
+                                    except Exception:
+                                        cache_key = key
+                                else:
+                                    cache_key = key
+                        else:
+                            # No args/kwargs: fall back to raw key
+                            cache_key = key
                     else:
-                        cache_key = key.format(**kwargs) if "{" in key else key
+                        cache_key = key
 
                 # Try to get from cache
                 entry = function_cache.get_entry(cache_key)
@@ -304,76 +339,59 @@ class BackgroundCache:
     All instances share ONE BackgroundScheduler, but each has its own cache storage.
     Works with both sync and async functions.
 
+    Args (public API, unified naming):
+        key (str): Unique cache key for the loader.
+        interval_seconds (int): Refresh interval.
+        ttl (int | None): TTL for cached value (defaults to 2 * interval_seconds).
+
     Example:
         # Async function
-        @BGCache.register_loader("categories", interval_seconds=300)
+        @BGCache.register_loader(key="categories", interval_seconds=300)
         async def load_categories():
             return await db.query("SELECT * FROM categories")
 
         # Sync function
-        @BGCache.register_loader("config", interval_seconds=300)
+        @BGCache.register_loader(key="config", interval_seconds=300)
         def load_config():
             return {"key": "value"}
 
         # With custom cache backend
-        @BGCache.register_loader("products", interval_seconds=300, cache=redis_cache)
+        @BGCache.register_loader(key="products", interval_seconds=300, cache=redis_cache)
         def load_products():
             return fetch_products_from_db()
     """
 
     @classmethod
     def shutdown(cls, wait: bool = True) -> None:
-        """
-        Stop the shared BackgroundScheduler.
-
-        Args:
-            wait: Whether to wait for running jobs to complete
-        """
+        """Stop the shared BackgroundScheduler."""
         _SharedScheduler.shutdown(wait)
 
     @classmethod
     def register_loader(
         cls,
-        cache_key: str,
+        key: str,
         interval_seconds: int,
-        ttl_seconds: int | None = None,
+        ttl: int | None = None,
         run_immediately: bool = True,
         on_error: Callable[[Exception], None] | None = None,
         cache: CacheStorage | None = None,
     ) -> Callable[[Callable[[], T]], Callable[[], T]]:
-        """
-        Decorator to register a background data loader.
-        Each loader gets its own cache instance (not shared).
-        All loaders share ONE BackgroundScheduler instance.
+        """Register a background data loader.
 
         Args:
-            cache_key: Unique key to store the loaded data
-            interval_seconds: How often to refresh the data (in seconds)
-            ttl_seconds: Cache TTL (defaults to interval_seconds * 2)
-            run_immediately: Whether to load data immediately on registration
-            on_error: Optional error handler callback
-            cache: Optional cache backend (InMemCache, RedisCache, etc.)
+            key: Unique cache key to store the loaded data.
+            interval_seconds: How often to refresh the data (in seconds).
+            ttl: Cache TTL (defaults to 2 * interval_seconds if None).
+            run_immediately: Whether to load data immediately on registration.
+            on_error: Optional error handler callback.
+            cache: Optional cache backend (InMemCache, RedisCache, etc.).
 
         Returns:
-            Decorated function that returns cached data
-
-        Example:
-            @BGCache.register_loader("products", interval_seconds=300)
-            async def load_products():
-                return await db.query("SELECT * FROM products")
-
-            # Call the function to get cached data
-            products = await load_products()
-
-            # Sync functions also supported
-            @BGCache.register_loader("config", interval_seconds=300)
-            def load_config():
-                return {"key": "value"}
-
-            config = load_config()
+            Decorated function that returns cached data (sync or async).
         """
-        if ttl_seconds is None:
-            ttl_seconds = interval_seconds * 2
+        cache_key = key
+        if ttl is None:
+            ttl = interval_seconds * 2
 
         # Create a dedicated cache instance for this loader
         loader_cache = cache if cache is not None else InMemCache()
@@ -403,7 +421,7 @@ class BackgroundCache:
 
                     duration = time.time() - start
 
-                    loader_cache.set(cache_key, data, ttl_seconds)
+                    loader_cache.set(cache_key, data, ttl)
                     logger.info(
                         f"Refreshed {cache_key} successfully in {duration:.3f}s"
                     )

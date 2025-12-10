@@ -12,8 +12,9 @@ Tests various scenarios:
 import time
 import random
 import statistics
-from typing import Callable, List
+from typing import Callable
 
+from advanced_caching import BGCache
 from src.advanced_caching import TTLCache
 
 

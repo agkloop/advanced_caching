@@ -6,7 +6,14 @@ Tests TTLCache, SWRCache, and BGCache functionality.
 import pytest
 import time
 
-from advanced_caching import BGCache, InMemCache, TTLCache, SWRCache
+from advanced_caching import (
+    BGCache,
+    InMemCache,
+    TTLCache,
+    SWRCache,
+    HybridCache,
+    validate_cache_storage,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -398,6 +405,205 @@ class TestCachePerformance:
 
         avg_time = duration / 1000
         assert avg_time < 0.0005, f"TTL cache hit too slow: {avg_time * 1000:.3f}ms"
+
+
+class TestKeyTemplates:
+    """Key template behavior for TTLCache and SWRCache."""
+
+    def test_ttl_positional_template(self):
+        calls = {"n": 0}
+
+        @TTLCache.cached("user:{}", ttl=60)
+        def get_user(user_id: int):
+            calls["n"] += 1
+            return {"id": user_id}
+
+        assert get_user(1) == {"id": 1}
+        assert get_user(1) == {"id": 1}
+        assert calls["n"] == 1  # cache hit by positional template
+
+    def test_ttl_named_template(self):
+        calls = {"n": 0}
+
+        @TTLCache.cached("user:{user_id}", ttl=60)
+        def get_user(*, user_id: int):
+            calls["n"] += 1
+            return {"id": user_id}
+
+        assert get_user(user_id=2) == {"id": 2}
+        assert get_user(user_id=2) == {"id": 2}
+        assert calls["n"] == 1
+
+    def test_swr_default_arg_with_key_function(self):
+        calls = {"n": 0}
+
+        @SWRCache.cached(
+            key=lambda *a, **k: f"i18n:all:{k.get('lang', a[0] if a else 'en')}",
+            ttl=5,
+            stale_ttl=10,
+        )
+        def load_all(lang: str = "en") -> dict:
+            calls["n"] += 1
+            return {"hello": f"Hello in {lang}"}
+
+        # Default arg used (no args provided)
+        r1 = load_all()
+        r2 = load_all(lang="en")
+        r3 = load_all()
+        assert r1 == {"hello": "Hello in en"}
+        assert r2 == {"hello": "Hello in en"}
+        assert r3 == {"hello": "Hello in en"}
+        assert calls["n"] == 1  # all share the same cache key
+
+    def test_swr_named_template_with_kwargs(self):
+        calls = {"n": 0}
+
+        @SWRCache.cached("i18n:{lang}", ttl=5, stale_ttl=10)
+        def load_i18n(*, lang: str = "en") -> dict:
+            calls["n"] += 1
+            return {"hello": f"Hello in {lang}"}
+
+        r1 = load_i18n(lang="en")
+        r2 = load_i18n(lang="en")
+        assert r1 == {"hello": "Hello in en"}
+        assert r2 == {"hello": "Hello in en"}
+        assert calls["n"] == 1
+
+    def test_swr_positional_template_with_args(self):
+        calls = {"n": 0}
+
+        @SWRCache.cached("i18n:{}", ttl=5, stale_ttl=10)
+        def load_i18n(lang: str) -> dict:
+            calls["n"] += 1
+            return {"hello": f"Hello in {lang}"}
+
+        r1 = load_i18n("en")
+        r2 = load_i18n("en")
+        assert r1 == {"hello": "Hello in en"}
+        assert r2 == {"hello": "Hello in en"}
+        assert calls["n"] == 1
+
+    def test_swr_named_template_with_extra_kwargs(self):
+        calls = {"n": 0}
+
+        @SWRCache.cached("i18n:{lang}", ttl=5, stale_ttl=10)
+        def load_i18n(lang: str, region: str | None = None) -> dict:
+            calls["n"] += 1
+            suffix = f"-{region}" if region else ""
+            return {"hello": f"Hello in {lang}{suffix}"}
+
+        r1 = load_i18n(lang="en", region="US")
+        r2 = load_i18n(lang="en", region="US")
+        assert r1 == {"hello": "Hello in en-US"}
+        assert r2 == {"hello": "Hello in en-US"}
+        assert calls["n"] == 1
+
+
+class TestStorageEdgeCases:
+    """Edge cases for storage backends to improve coverage."""
+
+    def test_inmem_cleanup_and_lock_property(self):
+        cache = InMemCache()
+        cache.set("a", 1, ttl=0)
+        cache.set("b", 2, ttl=0)
+        # No entries should be expired yet (infinite TTL)
+        assert cache.cleanup_expired() == 0
+        assert cache.lock is cache.lock  # property returns same lock
+
+    def test_inmem_set_if_not_exists_with_expired_entry(self, monkeypatch):
+        cache = InMemCache()
+        cache.set("k", "v", ttl=1)
+        # Force fresh_until in the past
+        entry = cache.get_entry("k")
+        assert entry is not None
+        entry.fresh_until = time.time() - 10
+        cache.set_entry("k", entry)
+        assert cache.set_if_not_exists("k", "v2", ttl=1) is True
+        assert cache.get("k") == "v2"
+
+    def test_validate_cache_storage_false(self):
+        class NotACache:
+            def get(self, key):
+                return None
+
+        assert validate_cache_storage(NotACache()) is False
+
+    def test_hybridcache_requires_l2(self):
+        with pytest.raises(ValueError):
+            HybridCache(l2_cache=None)
+
+    def test_hybridcache_basic_flow(self):
+        # Use InMemCache as fake L2
+        l2 = InMemCache()
+        cache = HybridCache(l1_cache=None, l2_cache=l2, l1_ttl=1)
+        cache.set("x", 123, ttl=10)
+        # First get hits L1 directly
+        assert cache.get("x") == 123
+        # Exists must be true
+        assert cache.exists("x") is True
+        # set_if_not_exists should fail because key exists in L2
+        assert cache.set_if_not_exists("x", 456, ttl=10) is False
+        # Delete removes from both
+        cache.delete("x")
+        assert cache.get("x") is None
+
+
+class TestDecoratorKeyEdgeCases:
+    """Exercise edge key-generation paths for decorators."""
+
+    def test_ttl_key_without_placeholders(self):
+        calls = {"n": 0}
+
+        @TTLCache.cached("static-key", ttl=60)
+        def f(user_id: int):
+            calls["n"] += 1
+            return user_id
+
+        assert f(1) == 1
+        assert f(2) == 1  # same key, result from first call
+        assert calls["n"] == 1
+
+    def test_swr_key_without_args_or_kwargs(self):
+        calls = {"n": 0}
+
+        @SWRCache.cached("static", ttl=1, stale_ttl=1)
+        def f() -> int:
+            calls["n"] += 1
+            return calls["n"]
+
+        # First call: miss
+        assert f() == 1
+        # Immediate second call: hit
+        assert f() == 1
+        assert calls["n"] == 1
+
+    def test_swr_key_template_single_kwarg_positional_fallback(self):
+        calls = {"n": 0}
+
+        # Template with positional placeholder but only kwarg passed
+        @SWRCache.cached("foo:{}", ttl=1, stale_ttl=1)
+        def f(*, x: int) -> int:
+            calls["n"] += 1
+            return x
+
+        assert f(x=1) == 1
+        assert f(x=1) == 1
+        assert calls["n"] == 1
+
+    def test_swr_invalid_format_falls_back_to_raw_key(self):
+        calls = {"n": 0}
+
+        # Template expects named field that is never provided; we only pass kwargs
+        @SWRCache.cached("foo:{missing}", ttl=1, stale_ttl=1)
+        def f(*, x: int) -> int:
+            calls["n"] += 1
+            return x
+
+        # First call populates cache with raw key "foo:{missing}" after format failure
+        assert f(x=1) == 1
+        # Second call uses same raw key and returns cached value despite different arg
+        assert f(x=2) == 1
+        assert calls["n"] == 1
 
 
 if __name__ == "__main__":
