@@ -11,6 +11,7 @@
 - [Installation](#installation) – Get started in 30 seconds
 - [Quick Examples](#quick-start) – Copy-paste ready code
 - [API Reference](#api-reference) – Full decorator & backend docs
+- [Storage & Redis](#storage--redis) – Redis/Hybrid/custom storage examples
 - [Custom Storage](#custom-storage) – Implement your own backend
 - [Benchmarks](#benchmarks) – See the performance gains
 - [Use Cases](#use-cases) – Real-world examples
@@ -37,6 +38,8 @@ pip install advanced-caching
 uv pip install advanced-caching
 # with Redis support
 pip install "advanced-caching[redis]"
+# with Redis support (uv)
+uv pip install "advanced-caching[redis]"
 ```
 
 ## Quick Start
@@ -89,6 +92,10 @@ user = await get_user_async(42)
 
 ## Benchmarks
 Full benchmarks available in `tests/benchmark.py`.
+
+Step-by-step benchmarking + profiling guide: `docs/benchmarking-and-profiling.md`.
+
+Storage & Redis usage is documented below.
 
 ## API Reference
 
@@ -159,7 +166,7 @@ Simple time-based cache with configurable TTL.
 TTLCache.cached(
     key: str | Callable[..., str],
     ttl: int,
-    cache: CacheStorage | None = None,
+    cache: CacheStorage | Callable[[], CacheStorage] | None = None,
 ) -> Callable
 ```
 
@@ -172,7 +179,7 @@ TTLCache.cached(
 
 Positional key:
 ```python
-@TTLCache.cached("user:{},", ttl=300)
+@TTLCache.cached("user:{}", ttl=300)
 def get_user(user_id: int):
     return db.fetch(user_id)
 
@@ -206,7 +213,7 @@ SWRCache.cached(
     key: str | Callable[..., str],
     ttl: int,
     stale_ttl: int = 0,
-    cache: CacheStorage | None = None,
+    cache: CacheStorage | Callable[[], CacheStorage] | None = None,
     enable_lock: bool = True,
 ) -> Callable
 ```
@@ -262,7 +269,7 @@ BGCache.register_loader(
     ttl: int | None = None,
     run_immediately: bool = True,
     on_error: Callable[[Exception], None] | None = None,
-    cache: CacheStorage | None = None,
+    cache: CacheStorage | Callable[[], CacheStorage] | None = None,
 ) -> Callable
 ```
 
@@ -325,6 +332,97 @@ BGCache.shutdown(wait=True)
 
 ### Storage Backends
 
+## Storage & Redis
+
+### Install (uv)
+
+```bash
+uv pip install advanced-caching
+uv pip install "advanced-caching[redis]"  # for RedisCache / HybridCache
+```
+
+### How storage is chosen
+
+- If you don’t pass `cache=...`, each decorated function lazily creates its own `InMemCache` instance.
+- You can pass either a cache instance (`cache=my_cache`) or a cache factory (`cache=lambda: my_cache`).
+
+### Share one storage instance
+
+```python
+from advanced_caching import InMemCache, TTLCache
+
+shared = InMemCache()
+
+@TTLCache.cached("user:{}", ttl=60, cache=shared)
+def get_user(user_id: int) -> dict:
+    return {"id": user_id}
+
+@TTLCache.cached("org:{}", ttl=60, cache=shared)
+def get_org(org_id: int) -> dict:
+    return {"id": org_id}
+```
+
+### Use RedisCache (distributed)
+
+`RedisCache` stores values in Redis using `pickle`.
+
+```python
+import redis
+from advanced_caching import RedisCache, TTLCache
+
+client = redis.Redis(host="localhost", port=6379)
+cache = RedisCache(client, prefix="app:")
+
+@TTLCache.cached("user:{}", ttl=300, cache=cache)
+def get_user(user_id: int) -> dict:
+    return {"id": user_id}
+```
+
+### Use SWRCache with RedisCache (recommended)
+
+`SWRCache` uses `get_entry`/`set_entry` so it can store freshness metadata.
+
+```python
+import redis
+from advanced_caching import RedisCache, SWRCache
+
+client = redis.Redis(host="localhost", port=6379)
+cache = RedisCache(client, prefix="products:")
+
+@SWRCache.cached("product:{}", ttl=60, stale_ttl=30, cache=cache)
+def get_product(product_id: int) -> dict:
+    return {"id": product_id}
+```
+
+### Use HybridCache (L1 memory + L2 Redis)
+
+`HybridCache` is a two-level cache:
+- **L1**: fast in-memory (`InMemCache`)
+- **L2**: Redis-backed (`RedisCache`)
+
+Reads go to L1 first; on L1 miss it tries L2; on L2 hit it warms L1.
+
+```python
+import redis
+from advanced_caching import HybridCache, InMemCache, RedisCache, TTLCache
+
+client = redis.Redis(host="localhost", port=6379)
+
+hybrid = HybridCache(
+    l1_cache=InMemCache(),
+    l2_cache=RedisCache(client, prefix="app:"),
+    l1_ttl=60,
+)
+
+@TTLCache.cached("user:{}", ttl=300, cache=hybrid)
+def get_user(user_id: int) -> dict:
+    return {"id": user_id}
+```
+
+Notes:
+- `ttl` on the decorator controls how long values are considered valid.
+- `l1_ttl` controls how long HybridCache keeps values in memory after an L2 hit.
+
 #### InMemCache()
 Thread-safe in-memory cache with TTL.
 
@@ -386,18 +484,16 @@ if entry and entry.is_fresh():
 
 Implement the `CacheStorage` protocol for custom backends (DynamoDB, file-based, encrypted storage, etc.).
 
-### File-Based Cache Example
+### File-based example
 
 ```python
 import json
 import time
 from pathlib import Path
-from advanced_caching import CacheStorage, TTLCache, validate_cache_storage
+from advanced_caching import CacheEntry, CacheStorage, TTLCache, validate_cache_storage
 
 
 class FileCache(CacheStorage):
-    """File-based cache storage."""
-
     def __init__(self, directory: str = "/tmp/cache"):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -406,26 +502,45 @@ class FileCache(CacheStorage):
         safe_key = key.replace("/", "_").replace(":", "_")
         return self.directory / f"{safe_key}.json"
 
-    def get(self, key: str):
+    def get_entry(self, key: str) -> CacheEntry | None:
         path = self._get_path(key)
         if not path.exists():
             return None
         try:
             with open(path) as f:
                 data = json.load(f)
-            if data["fresh_until"] < time.time():
-                path.unlink()
-                return None
-            return data["value"]
-        except (json.JSONDecodeError, KeyError, OSError):
+            return CacheEntry(
+                value=data["value"],
+                fresh_until=float(data["fresh_until"]),
+                created_at=float(data["created_at"]),
+            )
+        except Exception:
             return None
+
+    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
+        now = time.time()
+        if ttl is not None:
+            fresh_until = now + ttl if ttl > 0 else float("inf")
+            entry = CacheEntry(value=entry.value, fresh_until=fresh_until, created_at=now)
+        with open(self._get_path(key), "w") as f:
+            json.dump(
+                {"value": entry.value, "fresh_until": entry.fresh_until, "created_at": entry.created_at},
+                f,
+            )
+
+    def get(self, key: str):
+        entry = self.get_entry(key)
+        if entry is None:
+            return None
+        if not entry.is_fresh():
+            self.delete(key)
+            return None
+        return entry.value
 
     def set(self, key: str, value, ttl: int = 0) -> None:
         now = time.time()
         fresh_until = now + ttl if ttl > 0 else float("inf")
-        data = {"value": value, "fresh_until": fresh_until, "created_at": now}
-        with open(self._get_path(key), "w") as f:
-            json.dump(data, f)
+        self.set_entry(key, CacheEntry(value=value, fresh_until=fresh_until, created_at=now))
 
     def delete(self, key: str) -> None:
         self._get_path(key).unlink(missing_ok=True)
@@ -440,15 +555,12 @@ class FileCache(CacheStorage):
         return True
 
 
-# Use it
 cache = FileCache("/tmp/app_cache")
 assert validate_cache_storage(cache)
 
 @TTLCache.cached("user:{}", ttl=300, cache=cache)
 def get_user(user_id: int):
-    return {"id": user_id, "name": f"User {user_id}"}
-
-user = get_user(42)  # Stores in /tmp/app_cache/user_42.json
+    return {"id": user_id}
 ```
 
 ### Best Practices
@@ -463,12 +575,12 @@ user = get_user(42)  # Stores in /tmp/app_cache/user_42.json
 
 ### Run Tests
 ```bash
-pytest tests/test_correctness.py -v
+uv run pytest tests/test_correctness.py -v
 ```
 
 ### Run Benchmarks
 ```bash
-python tests/benchmark.py
+uv run python tests/benchmark.py
 ```
 
 
@@ -564,7 +676,7 @@ Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Add tests for new functionality
-4. Ensure all tests pass (`pytest`)
+4. Ensure all tests pass (`uv run pytest`)
 5. Submit a pull request
 
 ---
@@ -572,31 +684,3 @@ Contributions welcome! Please:
 ## License
 
 MIT License – See [LICENSE](LICENSE) for details.
-
----
-
-## Changelog
-
-### 0.1.0 (Initial Release)
-- ✅ TTL Cache decorator
-- ✅ SWR Cache decorator
-- ✅ Background Cache with APScheduler
-- ✅ InMemCache, RedisCache, HybridCache storage backends
-- ✅ Full async/sync support
-- ✅ Custom storage protocol
-- ✅ Comprehensive test suite
-- ✅ Benchmark suite
-
----
-
-## Roadmap
-
-- [ ] Distributed tracing/observability
-- [ ] Metrics export (Prometheus)
-- [ ] Cache warming strategies
-- [ ] Serialization plugins (msgpack, protobuf)
-- [ ] Redis cluster support
-- [ ] DynamoDB backend example
-
----
-

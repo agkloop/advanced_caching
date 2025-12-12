@@ -7,6 +7,7 @@ All storage backends implement the CacheStorage protocol for composability.
 
 from __future__ import annotations
 
+import math
 import pickle
 import threading
 import time
@@ -24,7 +25,7 @@ except ImportError:
 # ============================================================================
 
 
-@dataclass
+@dataclass(slots=True)
 class CacheEntry:
     """Internal cache entry with TTL support."""
 
@@ -32,13 +33,17 @@ class CacheEntry:
     fresh_until: float  # Unix timestamp
     created_at: float
 
-    def is_fresh(self) -> bool:
+    def is_fresh(self, now: float | None = None) -> bool:
         """Check if entry is still fresh."""
-        return time.time() < self.fresh_until
+        if now is None:
+            now = time.time()
+        return now < self.fresh_until
 
-    def age(self) -> float:
+    def age(self, now: float | None = None) -> float:
         """Get age of entry in seconds."""
-        return time.time() - self.created_at
+        if now is None:
+            now = time.time()
+        return now - self.created_at
 
 
 # ============================================================================
@@ -80,6 +85,14 @@ class CacheStorage(Protocol):
         """Check if key exists and is not expired."""
         ...
 
+    def get_entry(self, key: str) -> "CacheEntry | None":
+        """Get raw cache entry (may be stale)."""
+        ...
+
+    def set_entry(self, key: str, entry: "CacheEntry", ttl: int | None = None) -> None:
+        """Store raw cache entry, optionally overriding TTL."""
+        ...
+
     def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
         """
         Atomic set if not exists. Returns True if set, False if already exists.
@@ -96,7 +109,15 @@ def validate_cache_storage(cache: Any) -> bool:
     Returns:
         True if valid, False otherwise
     """
-    required_methods = ["get", "set", "delete", "exists", "set_if_not_exists"]
+    required_methods = [
+        "get",
+        "set",
+        "delete",
+        "exists",
+        "set_if_not_exists",
+        "get_entry",
+        "set_entry",
+    ]
     return all(
         hasattr(cache, method) and callable(getattr(cache, method))
         for method in required_methods
@@ -121,6 +142,12 @@ class InMemCache:
         self._data: dict[str, CacheEntry] = {}
         self._lock = threading.RLock()
 
+    def _make_entry(self, value: Any, ttl: int) -> CacheEntry:
+        """Create a cache entry with computed freshness window."""
+        now = time.time()
+        fresh_until = now + ttl if ttl > 0 else float("inf")
+        return CacheEntry(value=value, fresh_until=fresh_until, created_at=now)
+
     def get(self, key: str) -> Any | None:
         """Return value if key still fresh, otherwise drop it."""
         with self._lock:
@@ -128,7 +155,8 @@ class InMemCache:
             if entry is None:
                 return None
 
-            if not entry.is_fresh():
+            now = time.time()
+            if not entry.is_fresh(now):
                 del self._data[key]
                 return None
 
@@ -136,10 +164,7 @@ class InMemCache:
 
     def set(self, key: str, value: Any, ttl: int = 0) -> None:
         """Store value for ttl seconds (0=forever)."""
-        now = time.time()
-        fresh_until = now + ttl if ttl > 0 else float("inf")
-
-        entry = CacheEntry(value=value, fresh_until=fresh_until, created_at=now)
+        entry = self._make_entry(value, ttl)
 
         with self._lock:
             self._data[key] = entry
@@ -154,21 +179,25 @@ class InMemCache:
         return self.get(key) is not None
 
     def get_entry(self, key: str) -> CacheEntry | None:
-        """Get raw entry (for advanced usage like SWR)."""
+        """Get raw entry (can be stale)."""
         with self._lock:
             return self._data.get(key)
 
-    def set_entry(self, key: str, entry: CacheEntry) -> None:
-        """Set raw entry (for advanced usage like SWR)."""
+    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
+        """Set raw entry; optional ttl overrides entry freshness."""
+        if ttl is not None:
+            entry = self._make_entry(entry.value, ttl)
         with self._lock:
             self._data[key] = entry
 
     def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
         """Atomic set if not exists. Returns True if set, False if exists."""
         with self._lock:
-            if key in self._data and self._data[key].is_fresh():
+            now = time.time()
+            if key in self._data and self._data[key].is_fresh(now):
                 return False
-            self.set(key, value, ttl)
+            entry = self._make_entry(value, ttl)
+            self._data[key] = entry
             return True
 
     def clear(self) -> None:
@@ -233,7 +262,10 @@ class RedisCache:
             data = self.client.get(self._make_key(key))
             if data is None:
                 return None
-            return pickle.loads(data)
+            value = pickle.loads(data)
+            if isinstance(value, CacheEntry):
+                return value.value if value.is_fresh() else None
+            return value
         except Exception:
             return None
 
@@ -242,7 +274,8 @@ class RedisCache:
         try:
             data = pickle.dumps(value)
             if ttl > 0:
-                self.client.setex(self._make_key(key), ttl, data)
+                expires = max(1, int(math.ceil(ttl)))
+                self.client.setex(self._make_key(key), expires, data)
             else:
                 self.client.set(self._make_key(key), data)
         except Exception as e:
@@ -258,17 +291,50 @@ class RedisCache:
     def exists(self, key: str) -> bool:
         """Check if key exists."""
         try:
-            return bool(self.client.exists(self._make_key(key)))
+            entry = self.get_entry(key)
+            if entry is None:
+                return False
+            return entry.is_fresh()
         except Exception:
             return False
+
+    def get_entry(self, key: str) -> CacheEntry | None:
+        """Get raw entry without enforcing freshness (used by SWR)."""
+        try:
+            data = self.client.get(self._make_key(key))
+            if data is None:
+                return None
+            value = pickle.loads(data)
+            if isinstance(value, CacheEntry):
+                return value
+            # Legacy plain values: wrap to allow SWR-style access
+            now = time.time()
+            return CacheEntry(value=value, fresh_until=float("inf"), created_at=now)
+        except Exception:
+            return None
+
+    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
+        """Store CacheEntry, optionally with explicit TTL."""
+        try:
+            data = pickle.dumps(entry)
+            expires = None
+            if ttl is not None and ttl > 0:
+                expires = max(1, int(math.ceil(ttl)))
+            if expires:
+                self.client.setex(self._make_key(key), expires, data)
+            else:
+                self.client.set(self._make_key(key), data)
+        except Exception as e:
+            raise RuntimeError(f"Redis set_entry failed: {e}")
 
     def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
         """Atomic set if not exists."""
         try:
             data = pickle.dumps(value)
-            result = self.client.set(
-                self._make_key(key), data, ex=ttl if ttl > 0 else None, nx=True
-            )
+            expires = None
+            if ttl > 0:
+                expires = max(1, int(math.ceil(ttl)))
+            result = self.client.set(self._make_key(key), data, ex=expires, nx=True)
             return bool(result)
         except Exception:
             return False
@@ -334,6 +400,37 @@ class HybridCache:
         self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         self.l2.set(key, value, ttl)
 
+    def get_entry(self, key: str) -> CacheEntry | None:
+        """Get raw entry preferring L1, falling back to L2 and repopulating L1."""
+        entry: CacheEntry | None = None
+
+        if hasattr(self.l1, "get_entry"):
+            entry = self.l1.get_entry(key)  # type: ignore[attr-defined]
+        if entry is not None:
+            return entry
+
+        # Attempt L2 entry retrieval first
+        if hasattr(self.l2, "get_entry"):
+            entry = self.l2.get_entry(key)  # type: ignore[attr-defined]
+            if entry is not None:
+                # Populate L1 with limited TTL to avoid stale accumulation
+                self.l1.set_entry(key, entry, ttl=self.l1_ttl)
+                return entry
+
+        # Fall back to plain value fetch
+        value = self.l2.get(key)
+        if value is None:
+            return None
+
+        now = time.time()
+        entry = CacheEntry(
+            value=value,
+            fresh_until=now + self.l1_ttl if self.l1_ttl > 0 else float("inf"),
+            created_at=now,
+        )
+        self.l1.set_entry(key, entry, ttl=self.l1_ttl)
+        return entry
+
     def delete(self, key: str) -> None:
         """Delete from both caches."""
         self.l1.delete(key)
@@ -349,3 +446,15 @@ class HybridCache:
         if success:
             self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         return success
+
+    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
+        """Store raw entry in both layers, respecting L1 TTL."""
+        ttl = ttl if ttl is not None else max(int(entry.fresh_until - time.time()), 0)
+
+        l1_ttl = min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl
+        self.l1.set_entry(key, entry, ttl=l1_ttl)
+
+        if hasattr(self.l2, "set_entry"):
+            self.l2.set_entry(key, entry, ttl=ttl)  # type: ignore[attr-defined]
+        else:
+            self.l2.set(key, entry.value, ttl)

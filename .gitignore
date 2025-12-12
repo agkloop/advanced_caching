@@ -134,4 +134,6 @@ dmypy.json
 .uv-venv/
 .venv/
 venv/
+benchmarks.log
+scalene_profile.json
 
