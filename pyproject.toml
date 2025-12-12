@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "advanced-caching"
-version = "0.1.3"
+version = "0.1.4"
 description = "Production-ready composable caching with TTL, SWR, and background refresh patterns for Python."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 maintainers = [
-    { name = "ahmed", email = "ahmed99kamal@gmail.com"},
+    { name = "ahmed", email = "ahmed99kamal@gmail.com" },
 ]
 keywords = ["cache", "ttl", "redis", "scheduler", "apscheduler", "python", "swr", "stale-while-revalidate"]
 classifiers = [
@@ -28,7 +28,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "apscheduler>=3.10",
+    "apscheduler>=3.10"
 ]
 
 [project.optional-dependencies]
@@ -49,6 +49,8 @@ dev = [
     "pytest>=8.2",
     "pytest-cov>=4.0",
     "ruff>=0.14.8",
+    "scalene>=1.5.55",
+    "testcontainers[redis]>=4.0.0",
 ]
 
 [tool.pytest.ini_options]

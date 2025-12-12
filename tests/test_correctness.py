@@ -3,6 +3,7 @@ Fast and reliable unit tests for caching decorators.
 Tests TTLCache, SWRCache, and BGCache functionality.
 """
 
+import concurrent.futures
 import pytest
 import time
 
@@ -360,6 +361,57 @@ class TestBGCache:
         assert load_a()["name"] == "a"
         assert load_b()["name"] == "b"
         assert load_c()["name"] == "c"
+
+    def test_concurrent_access_is_thread_safe(self):
+        """Concurrent callers should read cached data without duplicate loads."""
+        call_count = {"count": 0}
+
+        @BGCache.register_loader(
+            "concurrent_loader", interval_seconds=60, run_immediately=True
+        )
+        def load_data():
+            # Simulate work to surface races if present
+            time.sleep(0.05)
+            call_count["count"] += 1
+            return {"value": call_count["count"]}
+
+        # Wait for initial load triggered by run_immediately
+        time.sleep(0.1)
+
+        def call_loader(_: int):
+            return load_data()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            results = list(executor.map(call_loader, range(24)))
+
+        # All callers should see the cached value produced by the first load
+        assert all(r == {"value": 1} for r in results)
+        assert call_count["count"] == 1
+
+    def test_concurrent_initial_load_when_no_immediate(self):
+        """When run_immediately=False, first concurrent callers should single-flight load."""
+        call_count = {"count": 0}
+
+        @BGCache.register_loader(
+            "concurrent_no_immediate",
+            interval_seconds=30,
+            run_immediately=False,
+            ttl=30,
+        )
+        def load_data():
+            time.sleep(0.05)
+            call_count["count"] += 1
+            return {"value": call_count["count"]}
+
+        def call_loader(_: int):
+            return load_data()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            results = list(executor.map(call_loader, range(24)))
+
+        # Only one load should have happened, all callers get cached value
+        assert all(r == {"value": 1} for r in results)
+        assert call_count["count"] == 1
 
 
 class TestCachePerformance:

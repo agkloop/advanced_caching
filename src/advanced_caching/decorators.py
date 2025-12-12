@@ -10,9 +10,12 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, TypeVar, ClassVar
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -24,6 +27,30 @@ T = TypeVar("T")
 
 # Minimal logger used only for error reporting (no debug/info on hot paths)
 logger = logging.getLogger(__name__)
+
+
+_SWR_EXECUTOR: ThreadPoolExecutor | None = None
+_SWR_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_swr_executor() -> ThreadPoolExecutor:
+    global _SWR_EXECUTOR
+    if _SWR_EXECUTOR is None:
+        with _SWR_EXECUTOR_LOCK:
+            if _SWR_EXECUTOR is None:
+                max_workers = min(32, (os.cpu_count() or 1) * 4)
+                _SWR_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=max_workers, thread_name_prefix="advanced_caching_swr"
+                )
+
+                def _shutdown() -> None:
+                    try:
+                        _SWR_EXECUTOR.shutdown(wait=False, cancel_futures=True)  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+
+                atexit.register(_shutdown)
+    return _SWR_EXECUTOR
 
 
 # ============================================================================
@@ -57,7 +84,10 @@ class SimpleTTLCache:
 
     @classmethod
     def cached(
-        cls, key: str | Callable[..., str], ttl: int, cache: CacheStorage | None = None
+        cls,
+        key: str | Callable[..., str],
+        ttl: int,
+        cache: CacheStorage | Callable[[], CacheStorage] | None = None,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         Cache decorator with TTL.
@@ -78,45 +108,101 @@ class SimpleTTLCache:
                 return x * 2
         """
         # Each decorated function gets its own cache instance
-        function_cache = cache if cache is not None else InMemCache()
+        cache_factory: Callable[[], CacheStorage]
+        if cache is None:
+            cache_factory = InMemCache
+        elif callable(cache):
+            cache_factory = cache  # type: ignore[assignment]
+        else:
+            cache_instance = cache
+
+            def cache_factory() -> CacheStorage:
+                return cache_instance
+
+        function_cache: CacheStorage | None = None
+        cache_lock = threading.Lock()
+
+        def get_cache() -> CacheStorage:
+            nonlocal function_cache
+            if function_cache is None:
+                with cache_lock:
+                    if function_cache is None:
+                        function_cache = cache_factory()
+            return function_cache
+
+        # Precompute key builder to reduce per-call branching
+        if callable(key):
+            key_fn: Callable[..., str] = key  # type: ignore[assignment]
+        else:
+            template = key
+
+            # Fast path for common templates like "prefix:{}" (single positional placeholder).
+            if "{" not in template:
+
+                def key_fn(*args, **kwargs) -> str:
+                    return template
+
+            elif (
+                template.count("{}") == 1
+                and template.count("{") == 1
+                and template.count("}") == 1
+            ):
+                prefix, suffix = template.split("{}", 1)
+
+                def key_fn(*args, **kwargs) -> str:
+                    if args:
+                        return prefix + str(args[0]) + suffix
+                    if kwargs:
+                        if len(kwargs) == 1:
+                            return prefix + str(next(iter(kwargs.values()))) + suffix
+                        return template
+                    return template
+
+            else:
+
+                def key_fn(*args, **kwargs) -> str:
+                    if args:
+                        try:
+                            return template.format(args[0])
+                        except Exception:
+                            return template
+                    if kwargs:
+                        try:
+                            return template.format(**kwargs)
+                        except Exception:
+                            # Attempt single-kwarg positional fallback
+                            if len(kwargs) == 1:
+                                try:
+                                    return template.format(next(iter(kwargs.values())))
+                                except Exception:
+                                    return template
+                            return template
+                    return template
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             def wrapper(*args, **kwargs) -> T:
                 # If ttl is 0 or negative, disable caching and call through
                 if ttl <= 0:
                     return func(*args, **kwargs)
-                # Generate cache key
-                if callable(key):
-                    cache_key = key(*args, **kwargs)
-                else:
-                    if "{" in key:
-                        if args:
-                            cache_key = key.format(args[0])
-                        elif kwargs:
-                            try:
-                                cache_key = key.format(**kwargs)
-                            except (KeyError, IndexError):
-                                cache_key = key
-                        else:
-                            cache_key = key
-                    else:
-                        cache_key = key
+                cache_key = key_fn(*args, **kwargs)
+
+                cache_obj = get_cache()
 
                 # Try cache first
-                cached_value = function_cache.get(cache_key)
+                cached_value = cache_obj.get(cache_key)
                 if cached_value is not None:
                     return cached_value
 
                 # Cache miss - call function
                 result = func(*args, **kwargs)
-                function_cache.set(cache_key, result, ttl)
+                cache_obj.set(cache_key, result, ttl)
                 return result
 
             # Store cache reference for testing/debugging
             wrapper.__wrapped__ = func  # type: ignore
             wrapper.__name__ = func.__name__  # type: ignore
             wrapper.__doc__ = func.__doc__  # type: ignore
-            wrapper._cache = function_cache  # type: ignore
+            wrapper._cache = get_cache()  # type: ignore
 
             return wrapper
 
@@ -154,7 +240,7 @@ class StaleWhileRevalidateCache:
         key: str | Callable[..., str],
         ttl: int,
         stale_ttl: int = 0,
-        cache: CacheStorage | None = None,
+        cache: CacheStorage | Callable[[], CacheStorage] | None = None,
         enable_lock: bool = True,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
@@ -178,74 +264,116 @@ class StaleWhileRevalidateCache:
                 return db.query("SELECT * FROM users WHERE id = ?", user_id)
         """
         # Each decorated function gets its own cache instance
-        function_cache = cache if cache is not None else InMemCache()
+        cache_factory: Callable[[], CacheStorage]
+        if cache is None:
+            cache_factory = InMemCache
+        elif callable(cache):
+            cache_factory = cache  # type: ignore[assignment]
+        else:
+            cache_instance = cache
+
+            def cache_factory() -> CacheStorage:
+                return cache_instance
+
+        function_cache: CacheStorage | None = None
+        cache_lock = threading.Lock()
+
+        def get_cache() -> CacheStorage:
+            nonlocal function_cache
+            if function_cache is None:
+                with cache_lock:
+                    if function_cache is None:
+                        function_cache = cache_factory()
+            return function_cache
+
+        # Precompute key builder to reduce per-call branching
+        if callable(key):
+            key_fn: Callable[..., str] = key  # type: ignore[assignment]
+        else:
+            template = key
+
+            # Fast path for common templates like "prefix:{}" (single positional placeholder).
+            if "{" not in template:
+
+                def key_fn(*args, **kwargs) -> str:
+                    return template
+
+            elif (
+                template.count("{}") == 1
+                and template.count("{") == 1
+                and template.count("}") == 1
+            ):
+                prefix, suffix = template.split("{}", 1)
+
+                def key_fn(*args, **kwargs) -> str:
+                    if args:
+                        return prefix + str(args[0]) + suffix
+                    if kwargs:
+                        if len(kwargs) == 1:
+                            return prefix + str(next(iter(kwargs.values()))) + suffix
+                        return template
+                    return template
+
+            else:
+
+                def key_fn(*args, **kwargs) -> str:
+                    if args:
+                        try:
+                            return template.format(args[0])
+                        except Exception:
+                            return template
+                    if kwargs:
+                        try:
+                            return template.format(**kwargs)
+                        except Exception:
+                            if len(kwargs) == 1:
+                                try:
+                                    return template.format(next(iter(kwargs.values())))
+                                except Exception:
+                                    return template
+                            return template
+                    return template
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             def wrapper(*args, **kwargs) -> T:
                 # If ttl is 0 or negative, disable caching and SWR behavior
                 if ttl <= 0:
                     return func(*args, **kwargs)
-                # Generate cache key
-                if callable(key):
-                    # Key function is responsible for handling args/defaults
-                    cache_key = key(*args, **kwargs)
-                else:
-                    if "{" in key:
-                        if args:
-                            # Use first positional arg for simple templates like "i18n:{}"
-                            cache_key = key.format(args[0])
-                        elif kwargs:
-                            # Prefer named formatting for templates like "i18n:{lang}"
-                            try:
-                                cache_key = key.format(**kwargs)
-                            except (KeyError, IndexError):
-                                # Fallback: if there is a single kwarg and template uses '{}'
-                                if len(kwargs) == 1:
-                                    only_value = next(iter(kwargs.values()))
-                                    try:
-                                        cache_key = key.format(only_value)
-                                    except Exception:
-                                        cache_key = key
-                                else:
-                                    cache_key = key
-                        else:
-                            # No args/kwargs: fall back to raw key
-                            cache_key = key
-                    else:
-                        cache_key = key
+                cache_key = key_fn(*args, **kwargs)
+
+                cache_obj = get_cache()
+                now = time.time()
 
                 # Try to get from cache
-                entry = function_cache.get_entry(cache_key)
+                entry = cache_obj.get_entry(cache_key)
 
                 if entry is None:
                     # Cache miss - fetch now
                     result = func(*args, **kwargs)
-                    now = time.time()
                     cache_entry = CacheEntry(
                         value=result, fresh_until=now + ttl, created_at=now
                     )
-                    function_cache.set_entry(cache_key, cache_entry)
+                    cache_obj.set_entry(cache_key, cache_entry)
                     return result
 
-                if entry.is_fresh():
+                if now < entry.fresh_until:
                     return entry.value
 
-                age = entry.age()
+                age = now - entry.created_at
                 if age > (ttl + stale_ttl):
                     # Too stale, fetch now
                     result = func(*args, **kwargs)
-                    now = time.time()
                     cache_entry = CacheEntry(
                         value=result, fresh_until=now + ttl, created_at=now
                     )
-                    function_cache.set_entry(cache_key, cache_entry)
+                    cache_obj.set_entry(cache_key, cache_entry)
                     return result
 
                 # Stale but within grace period - return stale and refresh in background
                 # Try to acquire refresh lock
                 lock_key = f"{cache_key}:refresh_lock"
                 if enable_lock:
-                    acquired = function_cache.set_if_not_exists(
+                    acquired = cache_obj.set_if_not_exists(
                         lock_key, "1", stale_ttl or 10
                     )
                     if not acquired:
@@ -259,22 +387,22 @@ class StaleWhileRevalidateCache:
                         cache_entry = CacheEntry(
                             value=new_value, fresh_until=now + ttl, created_at=now
                         )
-                        function_cache.set_entry(cache_key, cache_entry)
+                        cache_obj.set_entry(cache_key, cache_entry)
                     except Exception:
                         # Log background refresh failures but never raise
                         logger.exception(
                             "SWR background refresh failed for key %r", cache_key
                         )
 
-                thread = threading.Thread(target=refresh_job, daemon=True)
-                thread.start()
+                # Use a shared executor to avoid per-refresh thread creation overhead.
+                _get_swr_executor().submit(refresh_job)
 
                 return entry.value
 
             wrapper.__wrapped__ = func  # type: ignore
             wrapper.__name__ = func.__name__  # type: ignore
             wrapper.__doc__ = func.__doc__  # type: ignore
-            wrapper._cache = function_cache  # type: ignore
+            wrapper._cache = get_cache()  # type: ignore
             return wrapper
 
         return decorator
@@ -372,7 +500,7 @@ class BackgroundCache:
         ttl: int | None = None,
         run_immediately: bool = True,
         on_error: Callable[[Exception], None] | None = None,
-        cache: CacheStorage | None = None,
+        cache: CacheStorage | Callable[[], CacheStorage] | None = None,
     ) -> Callable[[Callable[[], T]], Callable[[], T]]:
         """Register a background data loader.
 
@@ -397,11 +525,33 @@ class BackgroundCache:
             ttl = 0
 
         # Create a dedicated cache instance for this loader
-        loader_cache = cache if cache is not None else InMemCache()
+        cache_factory: Callable[[], CacheStorage]
+        if cache is None:
+            cache_factory = InMemCache
+        elif callable(cache):
+            cache_factory = cache  # type: ignore[assignment]
+        else:
+            cache_instance = cache
+
+            def cache_factory() -> CacheStorage:
+                return cache_instance
+
+        loader_cache: CacheStorage | None = None
+        cache_init_lock = threading.Lock()
+
+        def get_cache() -> CacheStorage:
+            nonlocal loader_cache
+            if loader_cache is None:
+                with cache_init_lock:
+                    if loader_cache is None:
+                        loader_cache = cache_factory()
+            return loader_cache
 
         def decorator(loader_func: Callable[[], T]) -> Callable[[], T]:
             # Detect if function is async
             is_async = asyncio.iscoroutinefunction(loader_func)
+            # Single-flight lock to avoid duplicate initial loads under concurrency
+            loader_lock = asyncio.Lock() if is_async else threading.Lock()
 
             # If no scheduling/caching is desired, just wrap the function and call through
             if interval_seconds <= 0 or ttl <= 0:
@@ -434,6 +584,7 @@ class BackgroundCache:
             def refresh_job():
                 """Job that runs periodically to refresh the cache."""
                 try:
+                    cache_obj = get_cache()
                     if is_async:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
@@ -444,7 +595,7 @@ class BackgroundCache:
                     else:
                         data = loader_func()
 
-                    loader_cache.set(cache_key, data, ttl)
+                    cache_obj.set(cache_key, data, ttl)
                 except Exception as e:
                     # User-provided error handler gets first chance
                     if on_error:
@@ -484,16 +635,22 @@ class BackgroundCache:
 
                 async def async_wrapper() -> T:
                     """Get cached data or call loader if not available."""
-                    value = loader_cache.get(cache_key)
+                    cache_obj = get_cache()
+                    value = cache_obj.get(cache_key)
                     if value is not None:
                         return value
-                    # If not in cache yet, call loader directly
-                    return await loader_func()
+                    async with loader_lock:  # type: ignore[arg-type]
+                        value = cache_obj.get(cache_key)
+                        if value is not None:
+                            return value
+                        result = await loader_func()
+                        cache_obj.set(cache_key, result, ttl)
+                        return result
 
                 async_wrapper.__wrapped__ = loader_func  # type: ignore
                 async_wrapper.__name__ = loader_func.__name__  # type: ignore
                 async_wrapper.__doc__ = loader_func.__doc__  # type: ignore
-                async_wrapper._cache = loader_cache  # type: ignore
+                async_wrapper._cache = get_cache()  # type: ignore
                 async_wrapper._cache_key = cache_key  # type: ignore
 
                 return async_wrapper  # type: ignore
@@ -501,16 +658,22 @@ class BackgroundCache:
 
                 def sync_wrapper() -> T:
                     """Get cached data or call loader if not available."""
-                    value = loader_cache.get(cache_key)
+                    cache_obj = get_cache()
+                    value = cache_obj.get(cache_key)
                     if value is not None:
                         return value
-                    # If not in cache yet, call loader directly
-                    return loader_func()
+                    with loader_lock:  # type: ignore[arg-type]
+                        value = cache_obj.get(cache_key)
+                        if value is not None:
+                            return value
+                        result = loader_func()
+                        cache_obj.set(cache_key, result, ttl)
+                        return result
 
                 sync_wrapper.__wrapped__ = loader_func  # type: ignore
                 sync_wrapper.__name__ = loader_func.__name__  # type: ignore
                 sync_wrapper.__doc__ = loader_func.__doc__  # type: ignore
-                sync_wrapper._cache = loader_cache  # type: ignore
+                sync_wrapper._cache = get_cache()  # type: ignore
                 sync_wrapper._cache_key = cache_key  # type: ignore
 
                 return sync_wrapper  # type: ignore

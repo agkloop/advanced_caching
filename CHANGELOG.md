@@ -15,6 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redis cluster support
 - DynamoDB backend example
 
+## [0.1.4] - 2025-12-12
+
+### Changed
+- Performance improvements in hot paths:
+  - Reduced repeated cache initialization/lookups inside decorators.
+  - Reduced repeated `time.time()` calls by reusing a single timestamp per operation.
+  - `CacheEntry` is now a slotted dataclass to reduce per-entry memory/attribute overhead.
+- SWR background refresh now uses a shared thread pool (avoids spawning a new thread per refresh).
+
+### Added
+- Benchmarking & profiling tooling updates:
+  - Benchmarks can be configured via environment variables (e.g. `BENCH_WORK_MS`, `BENCH_RUNS`).
+  - Helper to compare JSON benchmark runs in `benchmarks.log`.
+  - Tight-loop profiler workload for decorator overhead.
+
+### Documentation
+- README updated to reflect current APIs, uv usage, and storage/Redis examples.
+- Added step-by-step benchmarking/profiling guide in `docs/benchmarking-and-profiling.md`.
+
 ## [0.1.3] - 2025-12-10
 
 ### Changed
@@ -74,9 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `storage.py` coverage improved to ~74%.
 - Ensured all tests pass under the documented `pyproject.toml` configuration.
 
-[Unreleased]: https://github.com/namshiv2/advanced_caching/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/namshiv2/advanced_caching/compare/v0.1.2...v0.1.3
-[0.1.2]: https://github.com/namshiv2/advanced_caching/compare/v0.1.1...v0.1.2
+[Unreleased]: https://github.com/agkloop/advanced_caching/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/agkloop/advanced_caching/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/agkloop/advanced_caching/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/agkloop/advanced_caching/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/namshiv2/advanced_caching/releases/tag/v0.1.1
 
 ## [0.1.1] - 2025-12-10
