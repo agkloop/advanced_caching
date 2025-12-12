@@ -70,27 +70,151 @@ def _print_compare(a: dict[str, Any], b: dict[str, Any]) -> None:
     a_cfg = a.get("config", {})
     b_cfg = b.get("config", {})
 
-    print(f"A: {a_ts}  config={a_cfg}")
-    print(f"B: {b_ts}  config={b_cfg}")
+    # Header
+    print("\n" + "=" * 100)
+    print("BENCHMARK COMPARISON REPORT")
+    print("=" * 100 + "\n")
+
+    print(f"Run A (baseline): {a_ts}")
+    print(f"  Config: {a_cfg}")
     print()
+    print(f"Run B (current):  {b_ts}")
+    print(f"  Config: {b_cfg}")
+    print("\n" + "-" * 100 + "\n")
 
     a_m = _median_map(a)
     b_m = _median_map(b)
     keys = sorted(set(a_m) | set(b_m))
 
-    print(
-        f"{'Section':<10} {'Strategy':<12} {'A med (ms)':>12} {'B med (ms)':>12} {'Δ (ms)':>10} {'Δ %':>8}"
-    )
+    # Group by section
+    sections = {}
     for section, label in keys:
-        a_med = a_m.get((section, label))
-        b_med = b_m.get((section, label))
-        if a_med is None or b_med is None:
-            continue
-        delta = b_med - a_med
-        pct = (delta / a_med * 100.0) if a_med > 0 else 0.0
+        if section not in sections:
+            sections[section] = []
+        sections[section].append(label)
+
+    # Calculate summary statistics
+    improvements = []
+    regressions = []
+
+    for section in sorted(sections.keys()):
+        print(f"\n📊 {section.upper()}")
+        print("-" * 100)
         print(
-            f"{section:<10} {label:<12} {a_med:>12.6f} {b_med:>12.6f} {delta:>10.6f} {pct:>8.2f}"
+            f"{'Strategy':<25} {'A (ms)':>12} {'B (ms)':>12} {'Change':>12} {'%':>8} {'Status':>12}"
         )
+        print("-" * 100)
+
+        for label in sorted(sections[section]):
+            a_med = a_m.get((section, label))
+            b_med = b_m.get((section, label))
+            if a_med is None or b_med is None:
+                continue
+
+            delta = b_med - a_med
+            pct = (delta / a_med * 100.0) if a_med > 0 else 0.0
+
+            # Determine status
+            if abs(pct) < 2:
+                status = "✓ SAME"
+            elif pct < 0:
+                status = f"✓ FASTER ({abs(pct):.1f}%)"
+                improvements.append((section, label, abs(pct)))
+            else:
+                status = f"✗ SLOWER ({pct:.1f}%)"
+                regressions.append((section, label, pct))
+
+            delta_str = f"{delta:+.4f}"
+            print(
+                f"{label:<25} {a_med:>12.4f} {b_med:>12.4f} {delta_str:>12} {pct:>7.1f}% {status:>12}"
+            )
+
+    # Summary section
+    print("\n" + "=" * 100)
+    print("SUMMARY")
+    print("=" * 100)
+
+    if improvements:
+        print(f"\n✓ {len(improvements)} IMPROVEMENT(S):")
+        for section, label, pct in sorted(improvements, key=lambda x: -x[2])[:5]:
+            print(f"  • {label:<30} in {section:<15} → {pct:>6.2f}% faster")
+    else:
+        print("\n✓ No improvements detected")
+
+    if regressions:
+        print(f"\n✗ {len(regressions)} REGRESSION(S):")
+        for section, label, pct in sorted(regressions, key=lambda x: -x[2])[:5]:
+            print(f"  • {label:<30} in {section:<15} → {pct:>6.2f}% slower")
+    else:
+        print("\n✓ No regressions detected")
+
+    # Overall verdict
+    print("\n" + "-" * 100)
+    total_changes = len(improvements) + len(regressions)
+    if total_changes == 0:
+        verdict = "✓ PERFORMANCE STABLE (no significant changes)"
+    elif len(improvements) > len(regressions):
+        avg_improvement = sum(x[2] for x in improvements) / len(improvements)
+        verdict = f"✓ OVERALL IMPROVEMENT (avg +{avg_improvement:.2f}% faster)"
+    else:
+        avg_regression = sum(x[2] for x in regressions) / len(regressions)
+        verdict = f"✗ OVERALL REGRESSION (avg +{avg_regression:.2f}% slower)"
+
+    # Detailed analysis by section
+    print("\n" + "=" * 100)
+    print("DETAILED ANALYSIS BY SCENARIO")
+    print("=" * 100)
+
+    for section in sorted(sections.keys()):
+        section_improvements = [x for x in improvements if x[0] == section]
+        section_regressions = [x for x in regressions if x[0] == section]
+
+        if not section_improvements and not section_regressions:
+            continue
+
+        print(f"\n🔍 {section.upper()}")
+
+        if section_improvements:
+            avg_improvement = sum(x[2] for x in section_improvements) / len(
+                section_improvements
+            )
+            print(f"   ✓ Average improvement: {avg_improvement:.2f}%")
+
+        if section_regressions:
+            avg_regression = sum(x[2] for x in section_regressions) / len(
+                section_regressions
+            )
+            print(f"   ✗ Average regression: {avg_regression:.2f}%")
+
+        if not section_improvements and section_regressions:
+            print(f"   ⚠️  Watch: Only regressions detected in this scenario")
+
+    # Recommendations
+    print("\n" + "=" * 100)
+    print("RECOMMENDATIONS")
+    print("=" * 100)
+
+    if total_changes == 0:
+        print("\n✓ No action needed. Performance is stable.")
+        recommendation = "continue with current changes"
+    elif len(regressions) > 0 and sum(x[2] for x in regressions) / len(regressions) > 5:
+        print("\n⚠️  SIGNIFICANT REGRESSIONS DETECTED")
+        print("   Consider:")
+        print("   • Profiling the affected code paths")
+        print("   • Reviewing recent changes for optimization issues")
+        print("   • Checking for new dependencies or imports")
+        recommendation = "investigate and optimize"
+    elif len(improvements) > 0:
+        print("\n✓ Performance improvements detected!")
+        print("   Recommendation: Merge and deploy")
+        recommendation = "good to merge"
+    else:
+        print("\n✓ No significant regressions detected")
+        recommendation = "safe to merge"
+
+    print("\n" + "=" * 100)
+    print(f"\n📋 STATUS: {recommendation.upper()}\n")
+    print("=" * 100 + "\n")
 
 
 def main() -> None:
