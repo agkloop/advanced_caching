@@ -670,6 +670,241 @@ class TestHybridCacheEdgeCases:
         assert cache.get("short_ttl") == "value"
 
 
+class TestCacheRehydration:
+    """Test that decorators can retrieve existing data from Redis without re-executing functions."""
+
+    def test_ttlcache_rehydrates_from_redis(self, redis_client):
+        """Test TTLCache retrieves existing Redis data without executing function."""
+        # Pre-populate Redis
+        test_data = {"result": "from_redis"}
+        redis_client.setex("compute:42", 60, pickle.dumps(test_data))
+
+        call_count = 0
+
+        @TTLCache.cached(
+            "compute:{}",
+            ttl=60,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def compute(x):
+            nonlocal call_count
+            call_count += 1
+            return {"result": f"computed_{x}"}
+
+        # First call should retrieve from Redis without executing function
+        result = compute(42)
+        assert result == test_data
+        assert call_count == 0, "Function should not execute when data exists in Redis"
+
+        # Second call should hit L1 cache
+        result = compute(42)
+        assert result == test_data
+        assert call_count == 0
+
+    def test_swrcache_rehydrates_from_redis(self, redis_client):
+        """Test SWRCache retrieves existing Redis data without executing function."""
+        # Pre-populate Redis with CacheEntry
+        now = time.time()
+        entry = CacheEntry(
+            value={"result": "from_redis"}, fresh_until=now + 60, created_at=now
+        )
+        redis_cache = RedisCache(redis_client=redis_client)
+        redis_cache.set_entry("fetch:99", entry, ttl=60)
+
+        call_count = 0
+
+        @SWRCache.cached(
+            "fetch:{}",
+            ttl=60,
+            stale_ttl=30,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def fetch(x):
+            nonlocal call_count
+            call_count += 1
+            return {"result": f"fetched_{x}"}
+
+        # First call should retrieve from Redis without executing function
+        result = fetch(99)
+        assert result == {"result": "from_redis"}
+        assert call_count == 0, "Function should not execute when data exists in Redis"
+
+        # Second call should hit L1 cache
+        result = fetch(99)
+        assert result == {"result": "from_redis"}
+        assert call_count == 0
+
+    def test_bgcache_rehydrates_from_redis(self, redis_client):
+        """Test BGCache retrieves existing Redis data without executing function on init."""
+        # Pre-populate Redis
+        test_data = {"users": ["Alice", "Bob", "Charlie"]}
+        redis_client.setex("users_list_rehydrate", 60, pickle.dumps(test_data))
+
+        call_count = 0
+
+        @BGCache.register_loader(
+            key="users_list_rehydrate",
+            interval_seconds=60,
+            run_immediately=True,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def load_users():
+            nonlocal call_count
+            call_count += 1
+            return {"users": ["New1", "New2"]}
+
+        # Function should not execute during init (data exists in Redis)
+        assert call_count == 0, "Function should not execute when data exists in Redis"
+
+        # First call should hit L1 cache
+        result = load_users()
+        assert result == test_data
+        assert call_count == 0
+
+        BGCache.shutdown(wait=False)
+
+    def test_ttlcache_executes_on_cache_miss(self, redis_client):
+        """Test TTLCache executes function when Redis is empty."""
+        redis_client.flushdb()
+
+        call_count = 0
+
+        @TTLCache.cached(
+            "compute:{}",
+            ttl=60,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def compute(x):
+            nonlocal call_count
+            call_count += 1
+            return {"result": f"computed_{x}"}
+
+        # First call should execute function (cache miss)
+        result = compute(42)
+        assert result == {"result": "computed_42"}
+        assert call_count == 1
+
+        # Second call should hit L1 cache
+        result = compute(42)
+        assert result == {"result": "computed_42"}
+        assert call_count == 1
+
+    def test_swrcache_executes_on_cache_miss(self, redis_client):
+        """Test SWRCache executes function when Redis is empty."""
+        redis_client.flushdb()
+
+        call_count = 0
+
+        @SWRCache.cached(
+            "fetch:{}",
+            ttl=60,
+            stale_ttl=30,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def fetch(x):
+            nonlocal call_count
+            call_count += 1
+            return {"result": f"fetched_{x}"}
+
+        # First call should execute function (cache miss)
+        result = fetch(99)
+        assert result == {"result": "fetched_99"}
+        assert call_count == 1
+
+        # Second call should hit L1 cache
+        result = fetch(99)
+        assert result == {"result": "fetched_99"}
+        assert call_count == 1
+
+    def test_bgcache_executes_on_cache_miss(self, redis_client):
+        """Test BGCache executes function on init when Redis is empty."""
+        redis_client.flushdb()
+
+        call_count = 0
+
+        @BGCache.register_loader(
+            key="empty_test_bgcache",
+            interval_seconds=60,
+            run_immediately=True,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def load_data():
+            nonlocal call_count
+            call_count += 1
+            return {"data": "fresh_load"}
+
+        # Function should execute during init (cache miss)
+        assert call_count == 1
+
+        # First call should hit L1 cache
+        result = load_data()
+        assert result == {"data": "fresh_load"}
+        assert call_count == 1
+
+        BGCache.shutdown(wait=False)
+
+    def test_ttlcache_different_args_separate_entries(self, redis_client):
+        """Test TTLCache creates separate cache entries for different arguments."""
+        # Pre-populate Redis with data for arg=10
+        test_data = {"result": "from_redis_10"}
+        redis_client.setex("compute:10", 60, pickle.dumps(test_data))
+
+        call_count = 0
+
+        @TTLCache.cached(
+            "compute:{}",
+            ttl=60,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(),
+                l2_cache=RedisCache(redis_client=redis_client),
+                l1_ttl=60,
+            ),
+        )
+        def compute(x):
+            nonlocal call_count
+            call_count += 1
+            return {"result": f"computed_{x}"}
+
+        # Call with arg=10 should get from Redis
+        result = compute(10)
+        assert result == test_data
+        assert call_count == 0
+
+        # Call with arg=20 should execute function (no Redis data)
+        result = compute(20)
+        assert result == {"result": "computed_20"}
+        assert call_count == 1
+
+        # Call with arg=10 again should get from L1
+        result = compute(10)
+        assert result == test_data
+        assert call_count == 1
+
+
 class TestRedisPerformance:
     """Performance tests with Redis backend."""
 

@@ -4,7 +4,7 @@ Advanced caching primitives: TTL decorators, SWR cache, and background loaders.
 Expose storage backends, decorators, and scheduler utilities under `advanced_caching`.
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 from .storage import (
     InMemCache,

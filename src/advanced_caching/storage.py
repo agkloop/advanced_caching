@@ -14,6 +14,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
+import orjson
 
 try:
     import redis
@@ -45,18 +46,18 @@ class PickleSerializer:
 
 
 class JsonSerializer:
-    """JSON serializer for text-friendly payloads (wraps CacheEntry)."""
+    """JSON serializer for text-friendly payloads (wraps CacheEntry). Uses orjson"""
 
     __slots__ = ()
     handles_entries = False
 
     @staticmethod
     def dumps(obj: Any) -> bytes:
-        return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        return orjson.dumps(obj)
 
     @staticmethod
     def loads(data: bytes) -> Any:
-        return json.loads(data.decode("utf-8"))
+        return orjson.loads(data)
 
 
 _BUILTIN_SERIALIZERS: dict[str, Serializer] = {

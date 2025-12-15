@@ -5,7 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.1.5 - 2025-12-15
+## [0.1.6] - 2025-12-15
+
+### Changed
+- `JsonSerializer` now uses `orjson` for significantly faster JSON serialization/deserialization (~2-3x faster)
+- `BGCache.register_loader` with `run_immediately=True` now checks if data exists in cache before executing the loader function, avoiding unnecessary function execution when data is already present in Redis/L2 cache.
+
+### Added
+- Comprehensive cache rehydration tests for all decorators (TTLCache, SWRCache, BGCache) verifying that existing Redis data is retrieved without re-executing functions.
+- 7 new integration tests in `TestCacheRehydration` class covering cache hit and cache miss scenarios for all decorators.
+
+### Performance
+- Reduced unnecessary loader executions in BGCache when Redis already contains fresh data.
+- Improved JSON serialization performance with orjson integration.
+
+## [0.1.5] - 2025-12-15
 
 ### Added
 - RedisCache now supports pluggable serializers with built-ins for `pickle` (default) and `json`, plus custom `dumps`/`loads` implementations.

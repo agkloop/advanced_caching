@@ -615,9 +615,11 @@ class BackgroundCache:
             # Get shared scheduler
             scheduler = _SharedScheduler.get_scheduler()
 
-            # Run immediately if requested
+            # Run immediately if requested (but only if cache is empty)
             if run_immediately:
-                refresh_job()
+                cache_obj = get_cache()
+                if cache_obj.get(cache_key) is None:
+                    refresh_job()
 
             # Schedule periodic refresh
             scheduler.add_job(
