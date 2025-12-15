@@ -3,8 +3,10 @@ Integration tests for Redis-backed caching.
 Uses testcontainers-python to spin up a real Redis instance for testing.
 """
 
+import pickle
 import pytest
 import time
+from typing import Any
 
 try:
     import redis
@@ -22,6 +24,7 @@ from advanced_caching import (
     RedisCache,
     HybridCache,
     InMemCache,
+    JsonSerializer,
 )
 
 
@@ -125,6 +128,55 @@ class TestRedisCache:
         data_list = [1, 2, 3, "four"]
         cache.set("list", data_list, ttl=60)
         assert cache.get("list") == data_list
+
+    def test_redis_cache_json_serializer(self, redis_client):
+        """Ensure JSON serializer roundtrips values and entries."""
+        cache = RedisCache(redis_client, prefix="json:", serializer=JsonSerializer())
+
+        payload = {"a": 1, "b": [1, 2, 3]}
+        cache.set("payload", payload, ttl=60)
+        assert cache.get("payload") == payload
+
+        entry = CacheEntry(
+            value={"ok": True},
+            fresh_until=time.time() + 5,
+            created_at=time.time(),
+        )
+        cache.set_entry("entry", entry, ttl=5)
+        loaded = cache.get_entry("entry")
+        assert isinstance(loaded, CacheEntry)
+        assert loaded.value == entry.value
+
+    def test_redis_cache_custom_serializer_handles_entries(self, redis_client):
+        """Custom serializer can opt-out of wrapping CacheEntry."""
+
+        class PickleSerializer:
+            handles_entries = True
+
+            @staticmethod
+            def dumps(obj: Any) -> bytes:
+                return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+            @staticmethod
+            def loads(data: bytes) -> Any:
+                return pickle.loads(data)
+
+        cache = RedisCache(
+            redis_client, prefix="custom:", serializer=PickleSerializer()
+        )
+
+        cache.set("k", {"v": 1}, ttl=30)
+        assert cache.get("k") == {"v": 1}
+
+        entry = CacheEntry(
+            value={"v": 2},
+            fresh_until=time.time() + 5,
+            created_at=time.time(),
+        )
+        cache.set_entry("entry", entry, ttl=5)
+        loaded = cache.get_entry("entry")
+        assert isinstance(loaded, CacheEntry)
+        assert loaded.value == entry.value
 
 
 class TestTTLCacheWithRedis:
@@ -349,6 +401,273 @@ class TestHybridCacheWithRedis:
         result2 = get_user(1)
         assert result2 == {"id": 1}
         assert calls["n"] == 1
+
+    def test_hybridcache_l2_ttl_defaults_to_double_l1(self, redis_client):
+        """Test l2_ttl defaults to l1_ttl * 2."""
+        l2 = RedisCache(redis_client, prefix="hybrid_l2:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=30)
+
+        assert cache.l1_ttl == 30
+        assert cache.l2_ttl == 60
+
+    def test_hybridcache_l2_ttl_explicit_value(self, redis_client):
+        """Test explicit l2_ttl is respected."""
+        l2 = RedisCache(redis_client, prefix="hybrid_l2:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=10, l2_ttl=100)
+
+        assert cache.l1_ttl == 10
+        assert cache.l2_ttl == 100
+
+    def test_hybridcache_l2_ttl_persistence(self, redis_client):
+        """Test that l2_ttl allows L2 to persist longer than L1."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="hybrid_persist:")
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        cache.set("key1", "value1", ttl=100)
+
+        # Both L1 and L2 should have it initially
+        assert l1.get("key1") == "value1"
+        assert l2.get("key1") == "value1"
+
+        # Wait for L1 to expire
+        time.sleep(1.2)
+
+        # L1 expired, L2 should still have it
+        assert l1.get("key1") is None
+        assert l2.get("key1") == "value1"
+
+        # HybridCache should fetch from L2 and repopulate L1
+        assert cache.get("key1") == "value1"
+        assert l1.get("key1") == "value1"
+
+    def test_hybridcache_l2_ttl_with_set_entry(self, redis_client):
+        """Test set_entry respects l2_ttl."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="hybrid_entry:")
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        now = time.time()
+        entry = CacheEntry(value="test_value", fresh_until=now + 100, created_at=now)
+
+        cache.set_entry("key2", entry, ttl=100)
+
+        # Both should have it
+        assert cache.get("key2") == "test_value"
+        assert l1.get("key2") == "test_value"
+        assert l2.get("key2") == "test_value"
+
+        # Wait for L1 to expire
+        time.sleep(1.2)
+
+        # L1 expired, L2 still has it
+        assert l1.get("key2") is None
+        assert l2.get("key2") == "test_value"
+
+    def test_hybridcache_l2_ttl_with_set_if_not_exists(self, redis_client):
+        """Test set_if_not_exists respects l2_ttl."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="hybrid_atomic:")
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        # First set succeeds
+        assert cache.set_if_not_exists("key3", "value3", ttl=100) is True
+
+        # Wait for L1 to expire
+        time.sleep(1.2)
+
+        # L2 should still have it, so second set fails
+        assert cache.set_if_not_exists("key3", "new_value", ttl=100) is False
+
+        # Value should be from L2
+        assert cache.get("key3") == "value3"
+
+    def test_hybridcache_l2_ttl_shorter_than_requested(self, redis_client):
+        """Test that l2_ttl caps the TTL when set() is called with larger TTL."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="hybrid_cap:")
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=2, l2_ttl=3)
+
+        # Set with large TTL, should be capped by l2_ttl
+        cache.set("key4", "value4", ttl=1000)
+
+        # Check that Redis has the key with capped TTL
+        redis_ttl = redis_client.ttl("hybrid_cap:key4")
+        # TTL should be approximately l2_ttl (3 seconds), allow some margin
+        assert 2 <= redis_ttl <= 4
+
+    def test_hybridcache_with_bgcache_and_l2_ttl(self, redis_client):
+        """Test BGCache with HybridCache using l2_ttl."""
+        l2 = RedisCache(redis_client, prefix="hybrid_bg:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=10, l2_ttl=60)
+
+        calls = {"n": 0}
+
+        @BGCache.register_loader(
+            key="config_with_l2",
+            interval_seconds=30,
+            run_immediately=True,
+            cache=cache,
+        )
+        def load_config():
+            calls["n"] += 1
+            return {"setting": "value", "count": calls["n"]}
+
+        time.sleep(0.1)
+
+        result = load_config()
+        assert result["count"] == 1
+        assert calls["n"] == 1
+
+        # Verify it's cached
+        result2 = load_config()
+        assert result2["count"] == 1
+        assert calls["n"] == 1
+
+
+class TestHybridCacheEdgeCases:
+    """Edge case tests for HybridCache with Redis."""
+
+    def test_hybridcache_zero_l1_ttl(self, redis_client):
+        """Test HybridCache with zero L1 TTL (infinite TTL in L1)."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="edge_zero:")
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=0, l2_ttl=10)
+
+        cache.set("key", "value", ttl=10)
+
+        # With l1_ttl=0, L1 stores with infinite TTL
+        assert l1.get("key") == "value"
+        # L2 should have it with l2_ttl cap
+        assert l2.get("key") == "value"
+        # HybridCache should return it
+        assert cache.get("key") == "value"
+
+        # Wait for L2 to expire
+        time.sleep(10.2)
+
+        # L1 still has it (infinite), L2 expired
+        assert l1.get("key") == "value"
+        assert l2.get("key") is None
+
+    def test_hybridcache_large_values(self, redis_client):
+        """Test HybridCache with large values."""
+        l2 = RedisCache(redis_client, prefix="edge_large:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=60)
+
+        # Large nested structure
+        large_value = {
+            f"key_{i}": {"data": [j for j in range(100)]} for i in range(100)
+        }
+
+        cache.set("large", large_value, ttl=60)
+        result = cache.get("large")
+        assert result == large_value
+
+    def test_hybridcache_special_characters_in_keys(self, redis_client):
+        """Test HybridCache with special characters in keys."""
+        l2 = RedisCache(redis_client, prefix="edge_special:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=60)
+
+        special_keys = [
+            "user:123",
+            "email:test@example.com",
+            "path:/api/v1/users",
+            "query:name=test&id=1",
+        ]
+
+        for key in special_keys:
+            cache.set(key, f"value_for_{key}", ttl=60)
+            assert cache.get(key) == f"value_for_{key}"
+
+    def test_hybridcache_concurrent_access(self, redis_client):
+        """Test HybridCache under concurrent access."""
+        import concurrent.futures
+
+        l2 = RedisCache(redis_client, prefix="edge_concurrent:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=60)
+
+        def write_and_read(i):
+            key = f"concurrent_{i}"
+            cache.set(key, f"value_{i}", ttl=60)
+            result = cache.get(key)
+            return result == f"value_{i}"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(write_and_read, range(100)))
+
+        assert all(results)
+
+    def test_hybridcache_delete_propagates_to_both_layers(self, redis_client):
+        """Test that delete removes from both L1 and L2."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="edge_delete:")
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60)
+
+        cache.set("delete_me", "value", ttl=60)
+
+        # Verify both have it
+        assert l1.get("delete_me") == "value"
+        assert l2.get("delete_me") == "value"
+
+        # Delete
+        cache.delete("delete_me")
+
+        # Verify both don't have it
+        assert l1.get("delete_me") is None
+        assert l2.get("delete_me") is None
+        assert cache.get("delete_me") is None
+
+    def test_hybridcache_none_values(self, redis_client):
+        """Test HybridCache correctly handles None values."""
+        l2 = RedisCache(redis_client, prefix="edge_none:")
+        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=60)
+
+        # Set explicit None value
+        cache.set("none_key", None, ttl=60)
+        result = cache.get("none_key")
+        assert result is None
+
+        # But key should exist
+        assert cache.exists("none_key")
+
+    def test_hybridcache_json_serializer_with_l2_ttl(self, redis_client):
+        """Test HybridCache with JSON serializer and l2_ttl."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="edge_json:", serializer=JsonSerializer())
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        data = {"string": "test", "number": 42, "list": [1, 2, 3]}
+        cache.set("json_key", data, ttl=100)
+
+        assert cache.get("json_key") == data
+
+        # Wait for L1 to expire
+        time.sleep(1.2)
+
+        # Should still get from L2
+        assert cache.get("json_key") == data
+
+    def test_hybridcache_very_short_l2_ttl(self, redis_client):
+        """Test HybridCache with very short l2_ttl caps L2 expiration."""
+        l1 = InMemCache()
+        l2 = RedisCache(redis_client, prefix="edge_short:")
+        # L1 has longer TTL (60s) but L2 expires quickly (1s)
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60, l2_ttl=1)
+
+        cache.set("short_ttl", "value", ttl=100)
+
+        # Initially both should have it
+        assert cache.get("short_ttl") == "value"
+
+        # Wait for L2 to expire (l2_ttl=1 caps the L2 TTL)
+        time.sleep(1.2)
+
+        # L1 should still have it (l1_ttl=60), but L2 expired
+        assert l1.get("short_ttl") == "value"
+        assert l2.get("short_ttl") is None
+        # HybridCache should return from L1
+        assert cache.get("short_ttl") == "value"
 
 
 class TestRedisPerformance:

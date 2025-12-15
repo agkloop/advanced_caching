@@ -7,6 +7,7 @@ All storage backends implement the CacheStorage protocol for composability.
 
 from __future__ import annotations
 
+import json
 import math
 import pickle
 import threading
@@ -18,6 +19,50 @@ try:
     import redis
 except ImportError:
     redis = None  # type: ignore
+
+
+class Serializer(Protocol):
+    """Simple serializer protocol used by RedisCache."""
+
+    def dumps(self, obj: Any) -> bytes: ...
+
+    def loads(self, data: bytes) -> Any: ...
+
+
+class PickleSerializer:
+    """Pickle serializer using highest protocol (fastest, flexible)."""
+
+    __slots__ = ()
+    handles_entries = True
+
+    @staticmethod
+    def dumps(obj: Any) -> bytes:
+        return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @staticmethod
+    def loads(data: bytes) -> Any:
+        return pickle.loads(data)
+
+
+class JsonSerializer:
+    """JSON serializer for text-friendly payloads (wraps CacheEntry)."""
+
+    __slots__ = ()
+    handles_entries = False
+
+    @staticmethod
+    def dumps(obj: Any) -> bytes:
+        return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+    @staticmethod
+    def loads(data: bytes) -> Any:
+        return json.loads(data.decode("utf-8"))
+
+
+_BUILTIN_SERIALIZERS: dict[str, Serializer] = {
+    "pickle": PickleSerializer(),
+    "json": JsonSerializer(),
+}
 
 
 # ============================================================================
@@ -239,18 +284,86 @@ class RedisCache:
         cache.set("user:123", {"name": "John"}, ttl=60)
     """
 
-    def __init__(self, redis_client: Any, prefix: str = ""):
+    def __init__(
+        self,
+        redis_client: Any,
+        prefix: str = "",
+        serializer: str | Serializer | None = "pickle",
+    ):
         """
         Initialize Redis cache.
 
         Args:
             redis_client: Redis client instance
             prefix: Key prefix for namespacing
+            serializer: Built-in name ("pickle" | "json" | "msgpack"), or
+                any object with ``dumps(obj)->bytes`` and ``loads(bytes)->Any``.
         """
         if redis is None:
             raise ImportError("redis package required. Install: pip install redis")
         self.client = redis_client
         self.prefix = prefix
+        self._serializer, self._wrap_entries = self._resolve_serializer(serializer)
+
+    @staticmethod
+    def _wrap_payload(obj: Any) -> Any:
+        if isinstance(obj, CacheEntry):
+            return {
+                "__ac_type": "entry",
+                "v": obj.value,
+                "f": obj.fresh_until,
+                "c": obj.created_at,
+            }
+        return {"__ac_type": "value", "v": obj}
+
+    @staticmethod
+    def _unwrap_payload(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            obj_type = obj.get("__ac_type")
+            if obj_type == "entry":
+                return CacheEntry(
+                    value=obj.get("v"),
+                    fresh_until=float(obj.get("f", 0.0)),
+                    created_at=float(obj.get("c", 0.0)),
+                )
+            if obj_type == "value":
+                return obj.get("v")
+        return obj
+
+    def _serialize(self, obj: Any) -> bytes:
+        if self._wrap_entries:
+            return self._serializer.dumps(self._wrap_payload(obj))
+        return self._serializer.dumps(obj)
+
+    def _deserialize(self, data: bytes) -> Any:
+        obj = self._serializer.loads(data)
+        if self._wrap_entries:
+            return self._unwrap_payload(obj)
+        return obj
+
+    def _resolve_serializer(
+        self, serializer: str | Serializer | None
+    ) -> tuple[Serializer, bool]:
+        if serializer is None:
+            serializer = "pickle"
+
+        if isinstance(serializer, str):
+            name = serializer.lower()
+            if name not in _BUILTIN_SERIALIZERS:
+                raise ValueError(
+                    "Unsupported serializer. Use 'pickle', 'json', or provide an object with dumps/loads."
+                )
+            serializer_obj = _BUILTIN_SERIALIZERS[name]
+            return (
+                serializer_obj,
+                not bool(getattr(serializer_obj, "handles_entries", False)),
+            )
+
+        if hasattr(serializer, "dumps") and hasattr(serializer, "loads"):
+            wrap = not bool(getattr(serializer, "handles_entries", False))
+            return (serializer, wrap)
+
+        raise TypeError("serializer must be a string or provide dumps/loads methods")
 
     def _make_key(self, key: str) -> str:
         """Add prefix to key."""
@@ -262,7 +375,7 @@ class RedisCache:
             data = self.client.get(self._make_key(key))
             if data is None:
                 return None
-            value = pickle.loads(data)
+            value = self._deserialize(data)
             if isinstance(value, CacheEntry):
                 return value.value if value.is_fresh() else None
             return value
@@ -272,7 +385,7 @@ class RedisCache:
     def set(self, key: str, value: Any, ttl: int = 0) -> None:
         """Set value with optional TTL in seconds."""
         try:
-            data = pickle.dumps(value)
+            data = self._serialize(value)
             if ttl > 0:
                 expires = max(1, int(math.ceil(ttl)))
                 self.client.setex(self._make_key(key), expires, data)
@@ -304,7 +417,7 @@ class RedisCache:
             data = self.client.get(self._make_key(key))
             if data is None:
                 return None
-            value = pickle.loads(data)
+            value = self._deserialize(data)
             if isinstance(value, CacheEntry):
                 return value
             # Legacy plain values: wrap to allow SWR-style access
@@ -316,7 +429,7 @@ class RedisCache:
     def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
         """Store CacheEntry, optionally with explicit TTL."""
         try:
-            data = pickle.dumps(entry)
+            data = self._serialize(entry)
             expires = None
             if ttl is not None and ttl > 0:
                 expires = max(1, int(math.ceil(ttl)))
@@ -330,7 +443,7 @@ class RedisCache:
     def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
         """Atomic set if not exists."""
         try:
-            data = pickle.dumps(value)
+            data = self._serialize(value)
             expires = None
             if ttl > 0:
                 expires = max(1, int(math.ceil(ttl)))
@@ -365,6 +478,7 @@ class HybridCache:
         l1_cache: CacheStorage | None = None,
         l2_cache: CacheStorage | None = None,
         l1_ttl: int = 60,
+        l2_ttl: int | None = None,
     ):
         """
         Initialize hybrid cache.
@@ -373,12 +487,14 @@ class HybridCache:
             l1_cache: L1 cache (memory), defaults to InMemCache
             l2_cache: L2 cache (distributed), required
             l1_ttl: TTL for L1 cache in seconds
+            l2_ttl: TTL for L2 cache in seconds, defaults to l1_ttl * 2
         """
         self.l1 = l1_cache if l1_cache is not None else InMemCache()
         if l2_cache is None:
             raise ValueError("l2_cache is required for HybridCache")
         self.l2 = l2_cache
         self.l1_ttl = l1_ttl
+        self.l2_ttl = l2_ttl if l2_ttl is not None else l1_ttl * 2
 
     def get(self, key: str) -> Any | None:
         """Get value, checking L1 then L2."""
@@ -398,7 +514,8 @@ class HybridCache:
     def set(self, key: str, value: Any, ttl: int = 0) -> None:
         """Set value in both L1 and L2."""
         self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
-        self.l2.set(key, value, ttl)
+        l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
+        self.l2.set(key, value, l2_ttl)
 
     def get_entry(self, key: str) -> CacheEntry | None:
         """Get raw entry preferring L1, falling back to L2 and repopulating L1."""
@@ -442,19 +559,22 @@ class HybridCache:
 
     def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
         """Atomic set if not exists (L2 only for consistency)."""
-        success = self.l2.set_if_not_exists(key, value, ttl)
+        l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
+        success = self.l2.set_if_not_exists(key, value, l2_ttl)
         if success:
             self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         return success
 
     def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
-        """Store raw entry in both layers, respecting L1 TTL."""
+        """Store raw entry in both layers, respecting L1 and L2 TTL."""
         ttl = ttl if ttl is not None else max(int(entry.fresh_until - time.time()), 0)
 
         l1_ttl = min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl
+        l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
+
         self.l1.set_entry(key, entry, ttl=l1_ttl)
 
         if hasattr(self.l2, "set_entry"):
-            self.l2.set_entry(key, entry, ttl=ttl)  # type: ignore[attr-defined]
+            self.l2.set_entry(key, entry, ttl=l2_ttl)  # type: ignore[attr-defined]
         else:
-            self.l2.set(key, entry.value, ttl)
+            self.l2.set(key, entry.value, l2_ttl)
