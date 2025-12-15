@@ -28,7 +28,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "apscheduler>=3.10"
+    "apscheduler>=3.10",
+    "orjson>=3.11.5",
 ]
 
 [project.optional-dependencies]

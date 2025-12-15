@@ -136,4 +136,5 @@ dmypy.json
 venv/
 benchmarks.log
 scalene_profile.json
+/tests/ts_examples.py
 
