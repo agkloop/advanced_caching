@@ -721,6 +721,127 @@ class TestDecoratorKeyEdgeCases:
         assert calls["n"] == 1
 
 
+class TestHybridCache:
+    """Test HybridCache L1+L2 behavior with l2_ttl."""
+
+    def test_l2_ttl_defaults_to_l1_ttl_times_2(self):
+        """Test that l2_ttl defaults to l1_ttl * 2."""
+        l1 = InMemCache()
+        l2 = InMemCache()
+
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60)
+        assert cache.l1_ttl == 60
+        assert cache.l2_ttl == 120
+
+    def test_l2_ttl_explicit_value(self):
+        """Test that explicit l2_ttl is respected."""
+        l1 = InMemCache()
+        l2 = InMemCache()
+
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60, l2_ttl=300)
+        assert cache.l1_ttl == 60
+        assert cache.l2_ttl == 300
+
+    def test_set_respects_l2_ttl(self):
+        """Test that set() uses l2_ttl for L2 cache."""
+        l1 = InMemCache()
+        l2 = InMemCache()
+
+        # Set l1_ttl=1, l2_ttl=10
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        cache.set("key1", "value1", ttl=100)
+
+        # Both should have the value immediately
+        assert cache.get("key1") == "value1"
+        assert l1.get("key1") == "value1"
+        assert l2.get("key1") == "value1"
+
+        # Wait for L1 to expire (l1_ttl=1)
+        time.sleep(1.2)
+
+        # L1 should be expired, but L2 should still have it
+        assert l1.get("key1") is None
+        assert l2.get("key1") == "value1"
+
+        # HybridCache should fetch from L2 and repopulate L1
+        assert cache.get("key1") == "value1"
+        assert l1.get("key1") == "value1"  # L1 repopulated
+
+    def test_set_entry_respects_l2_ttl(self):
+        """Test that set_entry() uses l2_ttl for L2 cache."""
+        from advanced_caching.storage import CacheEntry
+
+        l1 = InMemCache()
+        l2 = InMemCache()
+
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        now = time.time()
+        entry = CacheEntry(value="test_value", fresh_until=now + 100, created_at=now)
+
+        cache.set_entry("key2", entry, ttl=100)
+
+        # Both should have the entry (using get() which checks freshness)
+        assert cache.get("key2") == "test_value"
+        assert l1.get("key2") == "test_value"
+        assert l2.get("key2") == "test_value"
+
+        # Wait for L1 to expire (l1_ttl=1)
+        time.sleep(1.2)
+
+        # L1 expired (get() returns None for expired), L2 should still have it
+        assert l1.get("key2") is None
+        assert l2.get("key2") == "test_value"
+
+        # HybridCache should fetch from L2
+        assert cache.get("key2") == "test_value"
+
+    def test_set_if_not_exists_respects_l2_ttl(self):
+        """Test that set_if_not_exists() uses l2_ttl for L2 cache."""
+        l1 = InMemCache()
+        l2 = InMemCache()
+
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=1, l2_ttl=10)
+
+        # First set should succeed
+        assert cache.set_if_not_exists("key3", "value3", ttl=100) is True
+        assert cache.get("key3") == "value3"
+
+        # Second set should fail (key exists)
+        assert cache.set_if_not_exists("key3", "value3_new", ttl=100) is False
+        assert cache.get("key3") == "value3"
+
+        # Wait for L1 to expire
+        time.sleep(1.2)
+
+        # L2 should still have it, so set_if_not_exists should fail
+        assert cache.set_if_not_exists("key3", "value3_new", ttl=100) is False
+
+        # Value should still be original from L2
+        assert cache.get("key3") == "value3"
+
+    def test_l2_ttl_with_zero_ttl_in_set(self):
+        """Test that l2_ttl is used when ttl=0 is passed to set()."""
+        l1 = InMemCache()
+        l2 = InMemCache()
+
+        cache = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=2, l2_ttl=5)
+
+        # Set with ttl=0 should use l1_ttl and l2_ttl defaults
+        cache.set("key4", "value4", ttl=0)
+
+        assert cache.get("key4") == "value4"
+
+        # Wait for L1 to expire
+        time.sleep(2.2)
+
+        # L1 expired, but L2 should still have it (l2_ttl=5)
+        assert l1.get("key4") is None
+        assert l2.get("key4") == "value4"
+        assert cache.get("key4") == "value4"
+
+
 class TestNoCachingWhenZero:
     """Ensure ttl/interval_seconds == 0 disables caching/background behavior."""
 

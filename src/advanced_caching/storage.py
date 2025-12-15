@@ -478,6 +478,7 @@ class HybridCache:
         l1_cache: CacheStorage | None = None,
         l2_cache: CacheStorage | None = None,
         l1_ttl: int = 60,
+        l2_ttl: int | None = None,
     ):
         """
         Initialize hybrid cache.
@@ -486,12 +487,14 @@ class HybridCache:
             l1_cache: L1 cache (memory), defaults to InMemCache
             l2_cache: L2 cache (distributed), required
             l1_ttl: TTL for L1 cache in seconds
+            l2_ttl: TTL for L2 cache in seconds, defaults to l1_ttl * 2
         """
         self.l1 = l1_cache if l1_cache is not None else InMemCache()
         if l2_cache is None:
             raise ValueError("l2_cache is required for HybridCache")
         self.l2 = l2_cache
         self.l1_ttl = l1_ttl
+        self.l2_ttl = l2_ttl if l2_ttl is not None else l1_ttl * 2
 
     def get(self, key: str) -> Any | None:
         """Get value, checking L1 then L2."""
@@ -511,7 +514,8 @@ class HybridCache:
     def set(self, key: str, value: Any, ttl: int = 0) -> None:
         """Set value in both L1 and L2."""
         self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
-        self.l2.set(key, value, ttl)
+        l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
+        self.l2.set(key, value, l2_ttl)
 
     def get_entry(self, key: str) -> CacheEntry | None:
         """Get raw entry preferring L1, falling back to L2 and repopulating L1."""
@@ -555,19 +559,22 @@ class HybridCache:
 
     def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
         """Atomic set if not exists (L2 only for consistency)."""
-        success = self.l2.set_if_not_exists(key, value, ttl)
+        l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
+        success = self.l2.set_if_not_exists(key, value, l2_ttl)
         if success:
             self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         return success
 
     def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
-        """Store raw entry in both layers, respecting L1 TTL."""
+        """Store raw entry in both layers, respecting L1 and L2 TTL."""
         ttl = ttl if ttl is not None else max(int(entry.fresh_until - time.time()), 0)
 
         l1_ttl = min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl
+        l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
+
         self.l1.set_entry(key, entry, ttl=l1_ttl)
 
         if hasattr(self.l2, "set_entry"):
-            self.l2.set_entry(key, entry, ttl=ttl)  # type: ignore[attr-defined]
+            self.l2.set_entry(key, entry, ttl=l2_ttl)  # type: ignore[attr-defined]
         else:
-            self.l2.set(key, entry.value, ttl)
+            self.l2.set(key, entry.value, l2_ttl)

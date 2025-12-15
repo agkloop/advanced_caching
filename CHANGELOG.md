@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - RedisCache now supports pluggable serializers with built-ins for `pickle` (default) and `json`, plus custom `dumps`/`loads` implementations.
 - `HybridCache.from_redis` helper for a one-liner L1 (in-memory) + L2 (Redis) setup.
+- `HybridCache` now supports `l2_ttl` parameter for independent L2 TTL control. Defaults to `l1_ttl * 2` if not specified.
 - `__version__` attribute exposed in the main module for version checking.
-- Comprehensive test coverage for BGCache lambda cache factory pattern.
+- Comprehensive test coverage for BGCache lambda cache factory pattern and HybridCache l2_ttl behavior.
 - Documentation example for using lambda cache factories with BGCache (lazy Redis connection initialization).
 
 ## [0.1.4] - 2025-12-12

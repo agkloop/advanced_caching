@@ -157,8 +157,17 @@ from advanced_caching import HybridCache, InMemCache, RedisCache
 
 l1 = InMemCache()
 l2 = RedisCache(client, prefix="app:")
+# l2_ttl defaults to l1_ttl * 2 if not specified
 hybrid = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60)
+
+# Explicit l2_ttl for longer L2 persistence
+hybrid_long_l2 = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60, l2_ttl=3600)
 ```
+
+**TTL behavior:**
+- `l1_ttl`: How long data stays in fast L1 memory cache
+- `l2_ttl`: How long data persists in L2 (Redis). Defaults to `l1_ttl * 2`
+- When data expires from L1 but exists in L2, it's automatically repopulated to L1
 
 #### With BGCache using lambda factory
 
@@ -180,7 +189,8 @@ def get_redis_cache():
     cache=lambda: HybridCache(
         l1_cache=InMemCache(),
         l2_cache=get_redis_cache(),
-        l1_ttl=86400
+        l1_ttl=3600,
+        l2_ttl=86400  # L2 persists longer than L1
     )
 )
 def load_config_map() -> dict[str, dict]:
@@ -254,9 +264,9 @@ assert validate_cache_storage(cache)
 * `BGCache.register_loader(key, interval_seconds, ttl=None, run_immediately=True)`
 * Storages:
 
-  * `InMemCache`
-  * `RedisCache`
-  * `HybridCache`
+  * `InMemCache()`
+  * `RedisCache(redis_client, prefix="", serializer="pickle"|"json"|custom)`
+  * `HybridCache(l1_cache, l2_cache, l1_ttl=60, l2_ttl=None)` - `l2_ttl` defaults to `l1_ttl * 2`
 * Utilities:
 
   * `CacheEntry`
