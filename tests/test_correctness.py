@@ -413,6 +413,69 @@ class TestBGCache:
         assert all(r == {"value": 1} for r in results)
         assert call_count["count"] == 1
 
+    def test_lambda_cache_factory(self):
+        """Test BGCache with lambda returning HybridCache."""
+        call_count = {"count": 0}
+
+        @BGCache.register_loader(
+            "test_lambda_cache",
+            interval_seconds=3600,
+            run_immediately=True,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(), l2_cache=InMemCache(), l1_ttl=60
+            ),
+        )
+        def get_test_data() -> dict[str, str]:
+            call_count["count"] += 1
+            return {"key": "value", "count": str(call_count["count"])}
+
+        # First call should hit the cache (run_immediately=True loaded it)
+        result1 = get_test_data()
+        assert result1 == {"key": "value", "count": "1"}
+        assert call_count["count"] == 1
+
+        # Second call should return cached value
+        result2 = get_test_data()
+        assert result2 == {"key": "value", "count": "1"}
+        assert call_count["count"] == 1  # No additional call
+
+        # Verify cache object was created correctly
+        assert hasattr(get_test_data, "_cache")
+        assert get_test_data._cache is not None
+        assert isinstance(get_test_data._cache, HybridCache)
+
+    def test_lambda_cache_nested_dict_access(self):
+        """Test nested dict access pattern with lambda cache factory."""
+
+        @BGCache.register_loader(
+            "nested_dict_map",
+            interval_seconds=3600,
+            run_immediately=True,
+            cache=lambda: HybridCache(
+                l1_cache=InMemCache(), l2_cache=InMemCache(), l1_ttl=3600
+            ),
+        )
+        def get_mapping() -> dict[str, dict]:
+            return {
+                "color": {"en": "Color", "fr": "Couleur"},
+                "size": {"en": "Size", "fr": "Taille"},
+            }
+
+        # Test the exact pattern that could fail if lambda not instantiated
+        name = get_mapping().get("color", {}).get("en")
+        assert name == "Color"
+
+        name = get_mapping().get("size", {}).get("fr")
+        assert name == "Taille"
+
+        name = get_mapping().get("missing", {}).get("en")
+        assert name is None
+
+        # Verify cache is properly instantiated (not a lambda)
+        cache_obj = get_mapping._cache
+        assert isinstance(cache_obj, HybridCache)
+        assert not callable(cache_obj) or hasattr(cache_obj, "get")
+
 
 class TestCachePerformance:
     """Performance and speed tests."""

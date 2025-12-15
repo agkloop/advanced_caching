@@ -3,8 +3,10 @@ Integration tests for Redis-backed caching.
 Uses testcontainers-python to spin up a real Redis instance for testing.
 """
 
+import pickle
 import pytest
 import time
+from typing import Any
 
 try:
     import redis
@@ -22,6 +24,7 @@ from advanced_caching import (
     RedisCache,
     HybridCache,
     InMemCache,
+    JsonSerializer,
 )
 
 
@@ -125,6 +128,55 @@ class TestRedisCache:
         data_list = [1, 2, 3, "four"]
         cache.set("list", data_list, ttl=60)
         assert cache.get("list") == data_list
+
+    def test_redis_cache_json_serializer(self, redis_client):
+        """Ensure JSON serializer roundtrips values and entries."""
+        cache = RedisCache(redis_client, prefix="json:", serializer=JsonSerializer())
+
+        payload = {"a": 1, "b": [1, 2, 3]}
+        cache.set("payload", payload, ttl=60)
+        assert cache.get("payload") == payload
+
+        entry = CacheEntry(
+            value={"ok": True},
+            fresh_until=time.time() + 5,
+            created_at=time.time(),
+        )
+        cache.set_entry("entry", entry, ttl=5)
+        loaded = cache.get_entry("entry")
+        assert isinstance(loaded, CacheEntry)
+        assert loaded.value == entry.value
+
+    def test_redis_cache_custom_serializer_handles_entries(self, redis_client):
+        """Custom serializer can opt-out of wrapping CacheEntry."""
+
+        class PickleSerializer:
+            handles_entries = True
+
+            @staticmethod
+            def dumps(obj: Any) -> bytes:
+                return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+            @staticmethod
+            def loads(data: bytes) -> Any:
+                return pickle.loads(data)
+
+        cache = RedisCache(
+            redis_client, prefix="custom:", serializer=PickleSerializer()
+        )
+
+        cache.set("k", {"v": 1}, ttl=30)
+        assert cache.get("k") == {"v": 1}
+
+        entry = CacheEntry(
+            value={"v": 2},
+            fresh_until=time.time() + 5,
+            created_at=time.time(),
+        )
+        cache.set_entry("entry", entry, ttl=5)
+        loaded = cache.get_entry("entry")
+        assert isinstance(loaded, CacheEntry)
+        assert loaded.value == entry.value
 
 
 class TestTTLCacheWithRedis:

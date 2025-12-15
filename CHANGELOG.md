@@ -5,15 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## 0.1.5 - 2025-12-15
 
-### Planned
-- Distributed tracing/observability
-- Metrics export (Prometheus)
-- Cache warming strategies
-- Serialization plugins (msgpack, protobuf)
-- Redis cluster support
-- DynamoDB backend example
+### Added
+- RedisCache now supports pluggable serializers with built-ins for `pickle` (default) and `json`, plus custom `dumps`/`loads` implementations.
+- `HybridCache.from_redis` helper for a one-liner L1 (in-memory) + L2 (Redis) setup.
+- `__version__` attribute exposed in the main module for version checking.
+- Comprehensive test coverage for BGCache lambda cache factory pattern.
+- Documentation example for using lambda cache factories with BGCache (lazy Redis connection initialization).
 
 ## [0.1.4] - 2025-12-12
 
