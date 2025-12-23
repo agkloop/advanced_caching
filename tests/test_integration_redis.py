@@ -30,7 +30,7 @@ from advanced_caching import (
 
 
 @pytest.fixture(autouse=True)
-def reset_scheduler():
+async def reset_scheduler():
     yield
     BGCache.shutdown(wait=False)
 
