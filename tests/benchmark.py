@@ -1,5 +1,10 @@
+"""
+Benchmarks for advanced_caching (Async-only architecture).
+"""
+
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -9,24 +14,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, median, stdev
-from typing import Callable, Iterable
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_SRC_DIR = _REPO_ROOT / "src"
-if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
+from typing import Dict, List
 
 from advanced_caching import BGCache, SWRCache, TTLCache
 
 
-@dataclass(frozen=True)
-class Config:
-    seed: int = 12345
-    work_ms: float = 5.0
-    warmup: int = 10
-    runs: int = 300
-    mixed_key_space: int = 100
-    mixed_runs: int = 500
+# ---------------------------------------------------------------------------
+# Config + helpers
+# ---------------------------------------------------------------------------
 
 
 def _env_int(name: str, default: int) -> int:
@@ -41,6 +36,16 @@ def _env_float(name: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     return float(raw)
+
+
+@dataclass(frozen=True)
+class Config:
+    seed: int = 12345
+    work_ms: float = 5.0
+    warmup: int = 10
+    runs: int = 300
+    mixed_key_space: int = 100
+    mixed_runs: int = 500
 
 
 CFG = Config(
@@ -64,39 +69,36 @@ class Stats:
     stdev_ms: float
 
 
-def io_bound_call(user_id: int) -> dict:
-    """Simulate a typical small I/O call (db/API)."""
-    time.sleep(CFG.work_ms / 1000.0)
+async def async_io_bound_call(user_id: int) -> dict:
+    await asyncio.sleep(CFG.work_ms / 1000.0)
     return {"id": user_id, "name": f"User{user_id}"}
 
 
-def _timed(fn: Callable[[], object], warmup: int, runs: int) -> list[float]:
+async def _timed_async(fn, warmup: int, runs: int) -> List[float]:
     for _ in range(warmup):
-        fn()
-
-    times: list[float] = []
+        await fn()
+    out: List[float] = []
     for _ in range(runs):
         t0 = time.perf_counter()
-        fn()
-        times.append((time.perf_counter() - t0) * 1000.0)
-    return times
+        await fn()
+        out.append((time.perf_counter() - t0) * 1000.0)
+    return out
 
 
-def bench(
-    label: str, fn: Callable[[], object], *, notes: str, warmup: int, runs: int
+def stats_from_samples(
+    label: str, notes: str, runs: int, samples: List[float]
 ) -> Stats:
-    times = _timed(fn, warmup=warmup, runs=runs)
     return Stats(
-        label=label,
-        notes=notes,
-        runs=runs,
-        median_ms=median(times),
-        mean_ms=mean(times),
-        stdev_ms=(stdev(times) if len(times) > 1 else 0.0),
+        label,
+        notes,
+        runs,
+        median(samples),
+        mean(samples),
+        stdev(samples) if len(samples) > 1 else 0.0,
     )
 
 
-def print_table(title: str, rows: list[Stats]) -> None:
+def print_table(title: str, rows: List[Stats]) -> None:
     print("\n" + title)
     print("-" * len(title))
     print(
@@ -108,156 +110,8 @@ def print_table(title: str, rows: list[Stats]) -> None:
         )
 
 
-def keys_unique(n: int) -> Iterable[int]:
-    for i in range(1, n + 1):
-        yield i
-
-
-def keys_mixed(n: int, key_space: int) -> list[int]:
-    return [RNG.randint(1, key_space) for _ in range(n)]
-
-
-def scenario_cold() -> list[Stats]:
-    """Always-miss: new key every call."""
-    cold_keys = iter(keys_unique(CFG.runs + CFG.warmup))
-    baseline = bench(
-        "baseline",
-        lambda: io_bound_call(next(cold_keys)),
-        notes="no cache",
-        warmup=CFG.warmup,
-        runs=CFG.runs,
-    )
-
-    ttl_counter = iter(keys_unique(CFG.runs + CFG.warmup))
-
-    @TTLCache.cached("user:{}", ttl=60)
-    def ttl_fn(user_id: int) -> dict:
-        return io_bound_call(user_id)
-
-    ttl = bench(
-        "TTLCache",
-        lambda: ttl_fn(next(ttl_counter)),
-        notes="miss + store",
-        warmup=CFG.warmup,
-        runs=CFG.runs,
-    )
-
-    swr_counter = iter(keys_unique(CFG.runs + CFG.warmup))
-
-    @SWRCache.cached("user:{}", ttl=60, stale_ttl=30)
-    def swr_fn(user_id: int) -> dict:
-        return io_bound_call(user_id)
-
-    swr = bench(
-        "SWRCache",
-        lambda: swr_fn(next(swr_counter)),
-        notes="miss + store",
-        warmup=CFG.warmup,
-        runs=CFG.runs,
-    )
-
-    return [baseline, ttl, swr]
-
-
-def scenario_hot() -> list[Stats]:
-    """Always-hit: same key every call."""
-    baseline = bench(
-        "baseline",
-        lambda: io_bound_call(1),
-        notes="no cache",
-        warmup=max(2, CFG.warmup // 2),
-        runs=max(50, CFG.runs),
-    )
-
-    @TTLCache.cached("user:{}", ttl=60)
-    def ttl_fn(user_id: int) -> dict:
-        return io_bound_call(user_id)
-
-    ttl_fn(1)
-    ttl = bench(
-        "TTLCache",
-        lambda: ttl_fn(1),
-        notes="hit",
-        warmup=CFG.warmup,
-        runs=CFG.runs,
-    )
-
-    @SWRCache.cached("user:{}", ttl=60, stale_ttl=30)
-    def swr_fn(user_id: int) -> dict:
-        return io_bound_call(user_id)
-
-    swr_fn(1)
-    swr = bench(
-        "SWRCache",
-        lambda: swr_fn(1),
-        notes="fresh hit",
-        warmup=CFG.warmup,
-        runs=CFG.runs,
-    )
-
-    @BGCache.register_loader("bench_user", interval_seconds=60, run_immediately=True)
-    def bg_user() -> dict:
-        return io_bound_call(1)
-
-    time.sleep(0.05)
-    bg = bench(
-        "BGCache",
-        bg_user,
-        notes="preloaded",
-        warmup=CFG.warmup,
-        runs=CFG.runs,
-    )
-
-    return [baseline, ttl, swr, bg]
-
-
-def scenario_mixed() -> list[Stats]:
-    """Fixed key space: mix of hits/misses."""
-    keys = keys_mixed(CFG.mixed_runs + CFG.warmup, CFG.mixed_key_space)
-    it = iter(keys)
-    baseline = bench(
-        "baseline",
-        lambda: io_bound_call(next(it)),
-        notes=f"no cache (key_space={CFG.mixed_key_space})",
-        warmup=CFG.warmup,
-        runs=CFG.mixed_runs,
-    )
-
-    keys = keys_mixed(CFG.mixed_runs + CFG.warmup, CFG.mixed_key_space)
-    it = iter(keys)
-
-    @TTLCache.cached("user:{}", ttl=60)
-    def ttl_fn(user_id: int) -> dict:
-        return io_bound_call(user_id)
-
-    ttl = bench(
-        "TTLCache",
-        lambda: ttl_fn(next(it)),
-        notes=f"mixed (key_space={CFG.mixed_key_space})",
-        warmup=CFG.warmup,
-        runs=CFG.mixed_runs,
-    )
-
-    keys = keys_mixed(CFG.mixed_runs + CFG.warmup, CFG.mixed_key_space)
-    it = iter(keys)
-
-    @SWRCache.cached("user:{}", ttl=60, stale_ttl=30)
-    def swr_fn(user_id: int) -> dict:
-        return io_bound_call(user_id)
-
-    swr = bench(
-        "SWRCache",
-        lambda: swr_fn(next(it)),
-        notes=f"mixed (key_space={CFG.mixed_key_space})",
-        warmup=CFG.warmup,
-        runs=CFG.mixed_runs,
-    )
-
-    return [baseline, ttl, swr]
-
-
 def append_json_log(
-    status: str, error: str | None, sections: dict[str, list[Stats]]
+    status: str, error: str | None, sections: Dict[str, List[Stats]]
 ) -> None:
     payload = {
         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -288,7 +142,6 @@ def append_json_log(
             for name, rows in sections.items()
         },
     }
-
     try:
         log_path = Path(__file__).resolve().parent.parent / "benchmarks.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,26 +151,80 @@ def append_json_log(
         pass
 
 
+def shutdown_schedulers() -> None:
+    try:
+        BGCache.shutdown(wait=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Scenarios
+# ---------------------------------------------------------------------------
+
+
+async def scenario_hot_hits() -> List[Stats]:
+    """Benchmark hot cache hits for all strategies."""
+
+    # 1. TTLCache
+    @TTLCache.cached("bench:ttl:{}", ttl=60)
+    async def ttl_fn(user_id: int) -> dict:
+        return await async_io_bound_call(user_id)
+
+    # Prime cache
+    await ttl_fn(1)
+
+    ttl_samples = await _timed_async(
+        lambda: ttl_fn(1), warmup=CFG.warmup, runs=CFG.runs
+    )
+    ttl_stats = stats_from_samples("TTLCache", "hot hit", CFG.runs, ttl_samples)
+
+    # 2. SWRCache
+    @SWRCache.cached("bench:swr:{}", ttl=60, stale_ttl=30)
+    async def swr_fn(user_id: int) -> dict:
+        return await async_io_bound_call(user_id)
+
+    # Prime cache
+    await swr_fn(1)
+
+    swr_samples = await _timed_async(
+        lambda: swr_fn(1), warmup=CFG.warmup, runs=CFG.runs
+    )
+    swr_stats = stats_from_samples("SWRCache", "hot hit", CFG.runs, swr_samples)
+
+    # 3. BGCache
+    @BGCache.register_loader("bench:bg", interval_seconds=60, run_immediately=True)
+    async def bg_loader() -> dict:
+        return await async_io_bound_call(1)
+
+    # Wait for load
+    await asyncio.sleep(0.05)
+
+    bg_samples = await _timed_async(
+        lambda: bg_loader(), warmup=CFG.warmup, runs=CFG.runs
+    )
+    bg_stats = stats_from_samples("BGCache", "preloaded", CFG.runs, bg_samples)
+
+    return [ttl_stats, swr_stats, bg_stats]
+
+
+async def run_benchmarks() -> Dict[str, List[Stats]]:
+    return {
+        "hot_hits": await scenario_hot_hits(),
+    }
+
+
 def main() -> None:
     status = "ok"
-    error: str | None = None
-    sections: dict[str, list[Stats]] = {}
+    error = None
+    sections: Dict[str, List[Stats]] = {}
 
-    print("advanced_caching benchmark (minimal)")
-    print(
-        f"work_ms={CFG.work_ms} seed={CFG.seed} warmup={CFG.warmup} runs={CFG.runs} mixed_runs={CFG.mixed_runs}"
-    )
+    print("advanced_caching benchmark (Async-only)")
+    print(f"work_ms={CFG.work_ms} seed={CFG.seed} warmup={CFG.warmup} runs={CFG.runs}")
 
     try:
-        sections["cold"] = scenario_cold()
-        print_table("Cold (always miss)", sections["cold"])
-
-        sections["hot"] = scenario_hot()
-        print_table("Hot (always hit)", sections["hot"])
-
-        sections["mixed"] = scenario_mixed()
-        print_table("Mixed (hits + misses)", sections["mixed"])
-
+        sections = asyncio.run(run_benchmarks())
+        print_table("Hot Cache Hits", sections["hot_hits"])
     except KeyboardInterrupt:
         status = "interrupted"
         error = "KeyboardInterrupt"
@@ -327,10 +234,7 @@ def main() -> None:
         error = f"{type(e).__name__}: {e}"
         raise
     finally:
-        try:
-            BGCache.shutdown(wait=False)
-        except Exception:
-            pass
+        shutdown_schedulers()
         append_json_log(status=status, error=error, sections=sections)
 
 

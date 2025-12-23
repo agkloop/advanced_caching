@@ -44,23 +44,35 @@ uv pip install "advanced-caching[redis]"  # Redis support
 ```python
 from advanced_caching import TTLCache, SWRCache, BGCache
 
+# Sync function
 @TTLCache.cached("user:{}", ttl=300)
 def get_user(user_id: int) -> dict:
     return db.fetch(user_id)
 
+# Async function (works natively)
+@TTLCache.cached("user:{}", ttl=300)
+async def get_user_async(user_id: int) -> dict:
+    return await db.fetch(user_id)
+
+# Stale-While-Revalidate (Sync)
 @SWRCache.cached("product:{}", ttl=60, stale_ttl=30)
 def get_product(product_id: int) -> dict:
     return api.fetch_product(product_id)
 
-# Background refresh
+# Stale-While-Revalidate (Async)
+@SWRCache.cached("async:product:{}", ttl=60, stale_ttl=30)
+async def get_product_async(product_id: int) -> dict:
+    return await api.fetch_product(product_id)
+
+# Background refresh (Sync)
 @BGCache.register_loader("inventory", interval_seconds=300)
 def load_inventory() -> list[dict]:
     return warehouse_api.get_all_items()
 
-# Async works too
-@TTLCache.cached("user:{}", ttl=300)
-async def get_user_async(user_id: int) -> dict:
-    return await db.fetch(user_id)
+# Background refresh (Async)
+@BGCache.register_loader("inventory_async", interval_seconds=300)
+async def load_inventory_async() -> list[dict]:
+    return await warehouse_api.get_all_items()
 ```
 
 ---

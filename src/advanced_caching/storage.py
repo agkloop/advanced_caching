@@ -201,8 +201,7 @@ class InMemCache:
             if entry is None:
                 return None
 
-            now = time.time()
-            if not entry.is_fresh(now):
+            if time.time() >= entry.fresh_until:
                 del self._data[key]
                 return None
 

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-12-23
+
+### Changed
+- **Major Architecture Overhaul**: The library is now fully async-native.
+  - `TTLCache`, `SWRCache`, and `BGCache` now support `async def` functions natively using `await`.
+  - Synchronous functions are still supported via intelligent inspection, maintaining backward compatibility.
+- **Unified Scheduling**: `SWRCache` (in sync mode) and `BGCache` now use `APScheduler` (`SharedScheduler` and `SharedAsyncScheduler`) for all background tasks, replacing ad-hoc threading.
+- **Testing**: Integration tests rewritten to use `pytest-asyncio` with `mode="auto"`.
+
+### Added
+- `AsyncTTLCache`, `AsyncStaleWhileRevalidateCache`, `AsyncBackgroundCache` classes (aliased to `TTLCache`, `SWRCache`, `BGCache`).
+- `SharedAsyncScheduler` for managing async background jobs.
+- `pytest-asyncio` configuration in `pyproject.toml`.
+
 ## [0.1.6] - 2025-12-15
 
 ### Changed

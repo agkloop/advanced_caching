@@ -2,10 +2,9 @@
 
 This repo includes a small, reproducible benchmark harness and a profiler-friendly workload script.
 
-- Benchmark runner: `tests/benchmark.py`
+- Benchmark suite: `tests/benchmark.py`
 - Profiler workload: `tests/profile_decorators.py`
 - Benchmark log (append-only JSON-lines): `benchmarks.log`
-- Run comparison helper: `tests/compare_benchmarks.py`
 
 ## 1) Benchmarking (step-by-step)
 
@@ -17,14 +16,14 @@ This repo uses `uv`. From the repo root:
 uv sync
 ```
 
-### Step 1 — Run the default benchmark
+### Step 1 — Run the benchmark suite
 
 ```bash
 uv run python tests/benchmark.py
 ```
 
 What you get:
-- A printed table for **cold** (always miss), **hot** (always hit), and **mixed** (hits + misses).
+- Printed tables for **hot cache hits** (comparing TTLCache, SWRCache, BGCache).
 - A new JSON entry appended to `benchmarks.log` with the config + median/mean/stdev per strategy.
 
 ### Step 2 — Tune benchmark parameters (optional)
@@ -35,60 +34,42 @@ What you get:
 - `BENCH_WORK_MS` (default `5.0`) — simulated I/O latency (sleep)
 - `BENCH_WARMUP` (default `10`)
 - `BENCH_RUNS` (default `300`)
-- `BENCH_MIXED_KEY_SPACE` (default `100`)
-- `BENCH_MIXED_RUNS` (default `500`)
 
 Examples:
 
 ```bash
-BENCH_RUNS=1000 BENCH_MIXED_RUNS=2000 uv run python tests/benchmark.py
-```
-
-```bash
-# Focus on decorator overhead (no artificial sleep)
-BENCH_WORK_MS=0 BENCH_RUNS=200000 BENCH_MIXED_RUNS=300000 uv run python tests/benchmark.py
+BENCH_RUNS=1000 uv run python tests/benchmark.py
 ```
 
 ### Step 3 — Compare two runs
 
-There are two ways to select runs:
-
-- Relative: `last` / `last-N`
-- Explicit: integer indices (0-based; negatives allowed)
-
-List run indices quickly:
+The benchmark appends JSON lines to `benchmarks.log`. A quick helper to list runs:
 
 ```bash
 uv run python - <<'PY'
 import json
 from pathlib import Path
 runs=[]
+if not Path('benchmarks.log').exists():
+    print("No benchmarks.log found")
+    exit(0)
 for line in Path('benchmarks.log').read_text(encoding='utf-8', errors='replace').splitlines():
-    line=line.strip()
-    if not line.startswith('{'):
-        continue
-    try:
-        obj=json.loads(line)
-    except Exception:
-        continue
-    if isinstance(obj,dict) and 'results' in obj:
-        runs.append(obj)
+  line=line.strip()
+  if not line.startswith('{'):
+    continue
+  try:
+    obj=json.loads(line)
+  except Exception:
+    continue
+  if isinstance(obj,dict) and 'sections' in obj:
+    runs.append(obj)
 print('count',len(runs))
 for i,r in enumerate(runs):
-    print(i,r.get('ts'))
+  print(i,r.get('ts'))
 PY
 ```
 
-Compare (example: index 2 vs index 11):
-
-```bash
-uv run python tests/compare_benchmarks.py --a 2 --b 11
-```
-
-What to look at:
-- **Hot TTL/SWR** medians: these are the pure “cache-hit overhead” numbers.
-- **Mixed** medians: reflect a real-ish distribution; watch for regressions here.
-- Ignore small (<5–10%) deltas unless they repeat across multiple clean runs.
+To compare two indices (e.g., 2 vs 11), load the JSON objects in a notebook or script and diff the `sections` (hot medians for TTL/SWR/BG are the most sensitive to overhead changes).
 
 ### Step 4 — Make results stable (recommended practice)
 
@@ -162,6 +143,10 @@ PROFILE_N=5000000 \
   - `TTLCache` hot: overhead of key generation + `get()` + return.
   - `SWRCache` hot: overhead of key generation + `get_entry()` + freshness checks.
   - `BGCache` hot: overhead of key lookup + `get()` + return.
+
+- **Async results (important)**
+  - Async medians include the cost of creating/awaiting a coroutine and event-loop scheduling.
+  - For AsyncBG/AsyncSWR, compare against the `async_baseline` row (plain `await` with no cache) to estimate *cache-specific* overhead.
 
 - **Mixed path**
   - A high mean + low median typically indicates occasional slow misses/refreshes.
