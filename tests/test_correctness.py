@@ -257,7 +257,7 @@ class TestBGCache:
         assert call_count["count"] == 0
 
         # First call will execute the function since cache is empty
-        result = await load_data()
+        result = load_data()
         assert result == {"value": 1}
         assert call_count["count"] == 1
 
