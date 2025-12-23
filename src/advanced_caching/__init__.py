@@ -4,7 +4,7 @@ Advanced caching primitives: TTL decorators, SWR cache, and background loaders.
 Expose storage backends, decorators, and scheduler utilities under `advanced_caching`.
 """
 
-__version__ = "0.1.6"
+__version__ = "0.2.0"
 
 from .storage import (
     InMemCache,
@@ -18,14 +18,14 @@ from .storage import (
 )
 from .decorators import (
     TTLCache,
+    AsyncTTLCache,
     SWRCache,
-    StaleWhileRevalidateCache,
-    BackgroundCache,
+    AsyncStaleWhileRevalidateCache,
     BGCache,
+    AsyncBackgroundCache,
 )
 
 __all__ = [
-    "__version__",
     "InMemCache",
     "RedisCache",
     "HybridCache",
@@ -35,8 +35,9 @@ __all__ = [
     "PickleSerializer",
     "JsonSerializer",
     "TTLCache",
+    "AsyncTTLCache",
     "SWRCache",
-    "StaleWhileRevalidateCache",
-    "BackgroundCache",
+    "AsyncStaleWhileRevalidateCache",
     "BGCache",
+    "AsyncBackgroundCache",
 ]
