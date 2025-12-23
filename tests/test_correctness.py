@@ -306,9 +306,11 @@ class TestBGCache:
     async def test_error_handling(self):
         """Test error handler is called on failure."""
         errors = []
+        error_event = asyncio.Event()
 
         def error_handler(e):
             errors.append(e)
+            error_event.set()
 
         @BGCache.register_loader(
             "error_test",
@@ -319,7 +321,10 @@ class TestBGCache:
         async def load_data():
             raise ValueError("Test error")
 
-        await asyncio.sleep(0.1)
+        try:
+            await asyncio.wait_for(error_event.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pytest.fail("Error handler was not called within 1s")
 
         # Error should have been captured
         assert len(errors) == 1
@@ -329,19 +334,31 @@ class TestBGCache:
     async def test_periodic_refresh(self):
         """Test that data refreshes periodically."""
         call_count = {"count": 0}
+        load_event = asyncio.Event()
 
-        @BGCache.register_loader("periodic", interval_seconds=0.2, run_immediately=True)
+        @BGCache.register_loader("periodic", interval_seconds=0.1, run_immediately=True)
         async def load_data():
             call_count["count"] += 1
+            load_event.set()
             return {"value": call_count["count"]}
 
         # Wait for initial load
-        await asyncio.sleep(0.1)
-        assert call_count["count"] == 1
+        try:
+            await asyncio.wait_for(load_event.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pytest.fail("Initial load did not complete within 1s")
+
+        assert call_count["count"] >= 1
+        initial_count = call_count["count"]
 
         # Wait for one refresh
-        await asyncio.sleep(0.3)
-        assert call_count["count"] >= 2
+        load_event.clear()
+        try:
+            await asyncio.wait_for(load_event.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pytest.fail("Periodic refresh did not occur within 1s")
+
+        assert call_count["count"] > initial_count
 
         # Get updated data
         result = await load_data()
