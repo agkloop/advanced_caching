@@ -1,5 +1,4 @@
 import asyncio
-import time
 import pytest
 from advanced_caching import TTLCache, SWRCache, BGCache
 

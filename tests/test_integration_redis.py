@@ -30,7 +30,7 @@ from advanced_caching import (
 
 
 @pytest.fixture(autouse=True)
-async def reset_scheduler():
+def reset_scheduler():
     yield
     BGCache.shutdown(wait=False)
 
@@ -249,7 +249,7 @@ class TestTTLCacheWithRedis:
         assert result1 == {"id": 100, "name": "Product100"}
         assert calls["n"] == 1
 
-        result2 = await get_product(product_id=100)
+        await get_product(product_id=100)
         assert calls["n"] == 1
 
 
