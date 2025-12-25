@@ -73,19 +73,34 @@ def load_inventory() -> list[dict]:
 @BGCache.register_loader("inventory_async", interval_seconds=300)
 async def load_inventory_async() -> list[dict]:
     return await warehouse_api.get_all_items()
+
+# Configured Cache (Reusable Backend)
+# Create a decorator pre-wired with a specific cache (e.g., Redis)
+RedisTTL = TTLCache.configure(cache=RedisCache(redis_client))
+
+@RedisTTL.cached("user:{}", ttl=300)
+async def get_user_redis(user_id: int):
+    return await db.fetch(user_id)
 ```
 
 ---
 
 ## Key Templates
 
-* `"user:{}"` → first positional argument
-* `"user:{user_id}"` → named argument
-* Custom:
+The library supports smart key generation that handles both positional and keyword arguments seamlessly.
 
-```python
-key=lambda *a, **k: f"user:{k.get('user_id', a[0])}"
-```
+* **Positional Placeholder**: `"user:{}"`
+  * Uses the first argument, whether passed positionally or as a keyword.
+  * Example: `get_user(123)` or `get_user(user_id=123)` -> `"user:123"`
+
+* **Named Placeholder**: `"user:{user_id}"`
+  * Resolves `user_id` from keyword arguments OR positional arguments (by inspecting the function signature).
+  * Example: `def get_user(user_id): ...` called as `get_user(123)` -> `"user:123"`
+
+* **Custom Function**:
+  * For complex logic, pass a callable.
+  * Example1 for kw/args with default values use : `key=lambda *a, **k: f"user:{k.get('user_id', a[0])}"`
+  * Example2 fns with no defaults use : `key=lambda user_id: f"user:{user_id}"`
 
 ---
 
@@ -211,6 +226,35 @@ def load_config_map() -> dict[str, dict]:
 # Access nested data
 db_host = load_config_map().get("db", {}).get("host")
 ```
+
+---
+
+## Advanced Configuration
+
+To avoid repeating complex cache configurations (like HybridCache setup) in every decorator, you can create a pre-configured cache instance.
+
+```python
+from advanced_caching import SWRCache, HybridCache, InMemCache, RedisCache
+
+# 1. Define your cache factory
+def create_hybrid_cache():
+    return HybridCache(
+        l1_cache=InMemCache(),
+        l2_cache=RedisCache(redis_client),
+        l1_ttl=300,
+        l2_ttl=3600
+    )
+
+# 2. Create a configured decorator
+MySWRCache = SWRCache.configure(cache=create_hybrid_cache)
+
+# 3. Use it cleanly
+@MySWRCache.cached("users:{}", ttl=300)
+def get_users(code: str):
+    return db.get_users(code)
+```
+
+This works for `TTLCache`, `SWRCache`, and `BGCache`.
 
 ---
 

@@ -557,6 +557,62 @@ class TestKeyTemplates:
         assert r2 == {"hello": "Hello in en-US"}
         assert calls["n"] == 1
 
+    async def test_ttl_named_template_with_positional_arg(self):
+        """Test named placeholder with positional argument in TTLCache."""
+        calls = {"n": 0}
+
+        @TTLCache.cached("user:{user_id}", ttl=60)
+        async def get_user(user_id: int):
+            calls["n"] += 1
+            return {"id": user_id}
+
+        # Call with positional arg
+        assert (await get_user(1)) == {"id": 1}
+        assert (await get_user(1)) == {"id": 1}
+        assert calls["n"] == 1
+
+        # Call with different positional arg
+        assert (await get_user(2)) == {"id": 2}
+        assert calls["n"] == 2
+
+    async def test_swr_named_template_with_positional_arg(self):
+        """Test named placeholder with positional argument in SWRCache."""
+        calls = {"n": 0}
+
+        @SWRCache.cached("item:{item_id}", ttl=60)
+        async def get_item(item_id: int):
+            calls["n"] += 1
+            return {"id": item_id}
+
+        # Call with positional arg
+        assert (await get_item(10)) == {"id": 10}
+        assert (await get_item(10)) == {"id": 10}
+        assert calls["n"] == 1
+
+    async def test_multiple_named_placeholders_mixed_args(self):
+        """Test multiple named placeholders with mixed positional and keyword args."""
+        calls = {"n": 0}
+
+        @TTLCache.cached("u:{uid}:g:{gid}", ttl=60)
+        async def get_data(uid: int, gid: int):
+            calls["n"] += 1
+            return f"{uid}-{gid}"
+
+        # Positional + Keyword
+        assert (await get_data(1, gid=2)) == "1-2"
+        assert (await get_data(1, gid=2)) == "1-2"
+        assert calls["n"] == 1
+
+        # All Positional
+        assert (await get_data(3, 4)) == "3-4"
+        assert (await get_data(3, 4)) == "3-4"
+        assert calls["n"] == 2
+
+        # All Keyword
+        assert (await get_data(uid=5, gid=6)) == "5-6"
+        assert (await get_data(uid=5, gid=6)) == "5-6"
+        assert calls["n"] == 3
+
 
 class TestStorageEdgeCases:
     """Edge cases for storage backends to improve coverage."""

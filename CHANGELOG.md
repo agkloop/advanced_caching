@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-12-25
+
+### Fixed
+- **Key Generation Bug**: Fixed an issue where `TTLCache` and `SWRCache` would fail to correctly generate cache keys when using named placeholders (e.g., `"user:{id}"`) if the function was called with positional arguments.
+- **Performance**: Optimized cache key generation logic to avoid expensive signature binding on every call, using a fast-path for common patterns and efficient argument merging for complex cases.
+
+### Added
+- `configure()` class method on all decorators to easily create pre-configured cache instances (e.g., `MyCache = TTLCache.configure(cache=RedisCache(...))`).
+
 ## [0.2.0] - 2025-12-23
 
 ### Changed
@@ -16,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `AsyncTTLCache`, `AsyncStaleWhileRevalidateCache`, `AsyncBackgroundCache` classes (aliased to `TTLCache`, `SWRCache`, `BGCache`).
+- `configure()` class method on all decorators to easily create pre-configured cache instances (e.g., `MyCache = TTLCache.configure(cache=RedisCache(...))`).
 - `SharedAsyncScheduler` for managing async background jobs.
 - `pytest-asyncio` configuration in `pyproject.toml`.
 

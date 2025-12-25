@@ -10,10 +10,11 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Callable, TypeVar
+from typing import Callable, TypeVar, Any
 
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -28,56 +29,84 @@ logger = logging.getLogger(__name__)
 
 
 # Helper to normalize cache key builders for all decorators.
-def _create_key_fn(key: str | Callable[..., str]) -> Callable[..., str]:
+def _create_smart_key_fn(
+    key: str | Callable[..., str], func: Callable[..., Any]
+) -> Callable[..., str]:
+    # If the key is already a function (e.g., lambda u: f"user:{u}"), return it directly.
     if callable(key):
         return key  # type: ignore[assignment]
 
     template = key
+    # Optimization: Static key (e.g., "global_config")
+    # If there are no placeholders, we don't need to format anything.
     if "{" not in template:
 
         def key_fn(*args, **kwargs) -> str:
+            # Always return the static string, ignoring arguments.
             return template
 
         return key_fn
 
-    if (
-        template.count("{}") == 1
-        and template.count("{") == 1
-        and template.count("}") == 1
-    ):
+    # Optimization: Simple positional key "prefix:{}" (e.g., "user:{}")
+    # This is a very common pattern, so we optimize it to avoid full string formatting.
+    if template.count("{}") == 1 and template.count("{") == 1:
         prefix, suffix = template.split("{}", 1)
 
         def key_fn(*args, **kwargs) -> str:
+            # If positional args are provided (e.g., get_user(123)), use the first one.
             if args:
-                return prefix + str(args[0]) + suffix
+                return f"{prefix}{args[0]}{suffix}"
+            # If keyword args are provided (e.g., get_user(user_id=123)), use the first value.
+            # This supports the case where a positional placeholder is used but the function is called with kwargs.
             if kwargs:
-                if len(kwargs) == 1:
-                    return prefix + str(next(iter(kwargs.values()))) + suffix
-                return template
+                # Fallback for single kwarg usage with positional template
+                return f"{prefix}{next(iter(kwargs.values()))}{suffix}"
+            # If no arguments are provided, return the raw template (e.g., "user:{}").
             return template
 
         return key_fn
 
+    # General case: Named placeholders (e.g., "user:{id}") or complex positional (e.g., "{}:{}" or "{0}")
+    # We need to inspect the function signature to map positional arguments to parameter names.
+    sig = inspect.signature(func)
+    param_names = list(sig.parameters.keys())
+
+    # Pre-compute defaults to handle cases where arguments are omitted but have default values.
+    # e.g., def func(a=1): ... with key="{a}"
+    defaults = {
+        k: v.default
+        for k, v in sig.parameters.items()
+        if v.default is not inspect.Parameter.empty
+    }
+
     def key_fn(*args, **kwargs) -> str:
+        # Fast merge of arguments to support named placeholders.
+        # 1. Start with defaults (e.g., {'a': 1})
+        merged = defaults.copy() if defaults else {}
+
+        # 2. Map positional args to names (e.g., func(2) -> {'a': 2})
+        # This allows us to use named placeholders even when the function is called positionally.
         if args:
-            try:
-                return template.format(args[0])
-            except Exception:
-                try:
-                    return template.format(*args)
-                except Exception:
-                    return template
+            merged.update(zip(param_names, args))
+
+        # 3. Update with explicit kwargs (e.g., func(a=3) -> {'a': 3})
         if kwargs:
+            merged.update(kwargs)
+
+        try:
+            # Try formatting with named arguments (e.g., "user:{id}".format(id=123))
+            return template.format(**merged)
+        except (KeyError, ValueError, IndexError):
+            # Fallback: Try raw positional args (for "{}" templates or mixed usage)
+            # e.g., "user:{}".format(123) if named formatting failed.
             try:
-                return template.format(**kwargs)
+                return template.format(*args)
             except Exception:
-                if len(kwargs) == 1:
-                    try:
-                        return template.format(next(iter(kwargs.values())))
-                    except Exception:
-                        return template
+                # If formatting fails entirely, return the raw template to avoid crashing.
                 return template
-        return template
+        except Exception:
+            # Catch-all for other formatting errors.
+            return template
 
     return key_fn
 
@@ -105,6 +134,33 @@ class AsyncTTLCache:
     """
 
     @classmethod
+    def configure(
+        cls, cache: CacheStorage | Callable[[], CacheStorage]
+    ) -> type[AsyncTTLCache]:
+        """
+        Create a configured version of TTLCache with a default cache backend.
+
+        Example:
+            MyCache = TTLCache.configure(cache=RedisCache(...))
+            @MyCache.cached("key", ttl=60)
+            def func(): ...
+        """
+
+        class ConfiguredTTLCache(cls):
+            @classmethod
+            def cached(
+                cls_inner,
+                key: str | Callable[..., str],
+                ttl: int,
+                cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+            ) -> Callable[[Callable[..., T]], Callable[..., T]]:
+                # Use the configured cache if none is provided
+                return cls.cached(key, ttl, cache=cache or cls_inner._configured_cache)
+
+        ConfiguredTTLCache._configured_cache = cache  # type: ignore
+        return ConfiguredTTLCache
+
+    @classmethod
     def cached(
         cls,
         key: str | Callable[..., str],
@@ -119,10 +175,10 @@ class AsyncTTLCache:
             ttl: Time-to-live in seconds
             cache: Optional cache backend (defaults to InMemCache)
         """
-        key_fn = _create_key_fn(key)
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            key_fn = _create_smart_key_fn(key, func)
             cache_obj = cache_factory()
             cache_get_entry = cache_obj.get_entry
             cache_set = cache_obj.set
@@ -184,6 +240,35 @@ class AsyncStaleWhileRevalidateCache:
     """
 
     @classmethod
+    def configure(
+        cls, cache: CacheStorage | Callable[[], CacheStorage]
+    ) -> type[AsyncStaleWhileRevalidateCache]:
+        """
+        Create a configured version of SWRCache with a default cache backend.
+        """
+
+        class ConfiguredSWRCache(cls):
+            @classmethod
+            def cached(
+                cls_inner,
+                key: str | Callable[..., str],
+                ttl: int,
+                stale_ttl: int = 0,
+                cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+                enable_lock: bool = True,
+            ) -> Callable[[Callable[..., T]], Callable[..., T]]:
+                return cls.cached(
+                    key,
+                    ttl,
+                    stale_ttl=stale_ttl,
+                    cache=cache or cls_inner._configured_cache,
+                    enable_lock=enable_lock,
+                )
+
+        ConfiguredSWRCache._configured_cache = cache  # type: ignore
+        return ConfiguredSWRCache
+
+    @classmethod
     def cached(
         cls,
         key: str | Callable[..., str],
@@ -192,10 +277,10 @@ class AsyncStaleWhileRevalidateCache:
         cache: CacheStorage | Callable[[], CacheStorage] | None = None,
         enable_lock: bool = True,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-        key_fn = _create_key_fn(key)
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            key_fn = _create_smart_key_fn(key, func)
             cache_obj = cache_factory()
             get_entry = cache_obj.get_entry
             set_entry = cache_obj.set_entry
@@ -359,6 +444,37 @@ class AsyncBackgroundCache:
     def shutdown(cls, wait: bool = True) -> None:
         SharedAsyncScheduler.shutdown(wait)
         SharedScheduler.shutdown(wait)
+
+    @classmethod
+    def configure(
+        cls, cache: CacheStorage | Callable[[], CacheStorage]
+    ) -> type[AsyncBackgroundCache]:
+        """
+        Create a configured version of BGCache with a default cache backend.
+        """
+
+        class ConfiguredBGCache(cls):
+            @classmethod
+            def register_loader(
+                cls_inner,
+                key: str,
+                interval_seconds: int,
+                ttl: int | None = None,
+                run_immediately: bool = True,
+                on_error: Callable[[Exception], None] | None = None,
+                cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+            ) -> Callable[[Callable[[], T]], Callable[[], T]]:
+                return cls.register_loader(
+                    key,
+                    interval_seconds,
+                    ttl=ttl,
+                    run_immediately=run_immediately,
+                    on_error=on_error,
+                    cache=cache or cls_inner._configured_cache,
+                )
+
+        ConfiguredBGCache._configured_cache = cache  # type: ignore
+        return ConfiguredBGCache
 
     @classmethod
     def register_loader(
