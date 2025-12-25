@@ -175,7 +175,6 @@ class AsyncTTLCache:
             ttl: Time-to-live in seconds
             cache: Optional cache backend (defaults to InMemCache)
         """
-        # key_fn creation moved inside decorator to access func signature
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
@@ -278,7 +277,6 @@ class AsyncStaleWhileRevalidateCache:
         cache: CacheStorage | Callable[[], CacheStorage] | None = None,
         enable_lock: bool = True,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-        # key_fn creation moved inside decorator to access func signature
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
