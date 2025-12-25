@@ -15,6 +15,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from typing import Callable, TypeVar, Any
+from dataclasses import dataclass
 
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -440,10 +441,14 @@ SWRCache = AsyncStaleWhileRevalidateCache
 class AsyncBackgroundCache:
     """Background cache loader that uses APScheduler (AsyncIOScheduler for async, BackgroundScheduler for sync)."""
 
+    # Global registry to enforce single writer per cache key across all configured BGCache classes.
+    _writer_registry: dict[str, "_WriterRecord"] = {}
+
     @classmethod
     def shutdown(cls, wait: bool = True) -> None:
         SharedAsyncScheduler.shutdown(wait)
         SharedScheduler.shutdown(wait)
+        cls._writer_registry.clear()
 
     @classmethod
     def configure(
@@ -685,5 +690,275 @@ class AsyncBackgroundCache:
 
         return decorator
 
+    @classmethod
+    def register_writer(
+        cls,
+        key: str,
+        interval_seconds: int,
+        ttl: int | None = None,
+        run_immediately: bool = True,
+        on_error: Callable[[Exception], None] | None = None,
+        cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+    ) -> Callable[[Callable[[], T]], Callable[[], T]]:
+        cache_key = key
+        if cache_key in cls._writer_registry:
+            raise ValueError(f"BGCache writer already registered for key '{cache_key}'")
+
+        if interval_seconds <= 0:
+            interval_seconds = 0
+        if ttl is None and interval_seconds > 0:
+            ttl = interval_seconds * 2
+        if ttl is None:
+            ttl = 0
+
+        cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
+        cache_obj = cache_factory()
+        cache_get = cache_obj.get
+        cache_set = cache_obj.set
+
+        def decorator(loader_func: Callable[[], T]) -> Callable[[], T]:
+            if asyncio.iscoroutinefunction(loader_func):
+                loader_lock: asyncio.Lock | None = None
+
+                async def run_once() -> T:
+                    nonlocal loader_lock
+                    if loader_lock is None:
+                        loader_lock = asyncio.Lock()
+                    async with loader_lock:
+                        try:
+                            data = await loader_func()
+                            cache_set(cache_key, data, ttl)
+                            return data
+                        except Exception as e:  # pragma: no cover - defensive
+                            if on_error:
+                                try:
+                                    on_error(e)
+                                except Exception:
+                                    logger.exception(
+                                        "Async BGCache error handler failed for key %r",
+                                        cache_key,
+                                    )
+                            logger.exception(
+                                "Async BGCache writer failed for key %r", cache_key
+                            )
+                            raise
+
+                async def refresh_job() -> None:
+                    try:
+                        await run_once()
+                    except Exception:
+                        # Error already handled/logged inside run_once
+                        pass
+
+                next_run_time: datetime | None = None
+
+                if run_immediately:
+                    if cache_get(cache_key) is None:
+                        try:
+                            loop = asyncio.get_running_loop()
+                        except RuntimeError:
+                            asyncio.run(refresh_job())
+                            next_run_time = datetime.now() + timedelta(
+                                seconds=interval_seconds * 2
+                            )
+                        else:
+                            loop.create_task(refresh_job())
+                            next_run_time = datetime.now() + timedelta(
+                                seconds=interval_seconds * 2
+                            )
+
+                if interval_seconds > 0:
+                    scheduler = SharedAsyncScheduler.get_scheduler()
+                    SharedAsyncScheduler.ensure_started()
+                    scheduler.add_job(
+                        refresh_job,
+                        trigger=IntervalTrigger(seconds=interval_seconds),
+                        id=cache_key,
+                        replace_existing=True,
+                        next_run_time=next_run_time,
+                    )
+
+                async def writer_wrapper() -> T:
+                    value = cache_get(cache_key)
+                    if value is not None:
+                        return value  # type: ignore[return-value]
+                    return await run_once()
+
+                attach_wrapper_metadata(
+                    writer_wrapper,
+                    loader_func,
+                    cache_obj=cache_obj,
+                    cache_key=cache_key,
+                )
+                cls._writer_registry[cache_key] = _WriterRecord(
+                    cache_key=cache_key,
+                    cache=cache_obj,
+                    ttl=ttl,
+                    loader_wrapper=writer_wrapper,
+                    is_async=True,
+                )
+                return writer_wrapper  # type: ignore
+
+            # Sync writer path
+            from threading import Lock
+
+            loader_lock = Lock()
+
+            def run_once_sync() -> T:
+                with loader_lock:
+                    try:
+                        data = loader_func()
+                        cache_set(cache_key, data, ttl)
+                        return data
+                    except Exception as e:  # pragma: no cover - defensive
+                        if on_error:
+                            try:
+                                on_error(e)
+                            except Exception:
+                                logger.exception(
+                                    "Sync BGCache error handler failed for key %r",
+                                    cache_key,
+                                )
+                        logger.exception(
+                            "Sync BGCache writer failed for key %r", cache_key
+                        )
+                        raise
+
+            def refresh_job_sync() -> None:
+                try:
+                    run_once_sync()
+                except Exception:
+                    # Error already handled/logged inside run_once_sync
+                    pass
+
+            next_run_time_sync: datetime | None = None
+
+            if run_immediately:
+                if cache_get(cache_key) is None:
+                    refresh_job_sync()
+                    next_run_time_sync = datetime.now() + timedelta(
+                        seconds=interval_seconds * 2
+                    )
+
+            if interval_seconds > 0:
+                scheduler_sync = SharedScheduler.get_scheduler()
+                SharedScheduler.start()
+                scheduler_sync.add_job(
+                    refresh_job_sync,
+                    trigger=IntervalTrigger(seconds=interval_seconds),
+                    id=cache_key,
+                    replace_existing=True,
+                    next_run_time=next_run_time_sync,
+                )
+
+            def writer_wrapper_sync() -> T:
+                value = cache_get(cache_key)
+                if value is not None:
+                    return value  # type: ignore[return-value]
+                return run_once_sync()
+
+            attach_wrapper_metadata(
+                writer_wrapper_sync,
+                loader_func,
+                cache_obj=cache_obj,
+                cache_key=cache_key,
+            )
+            cls._writer_registry[cache_key] = _WriterRecord(
+                cache_key=cache_key,
+                cache=cache_obj,
+                ttl=ttl,
+                loader_wrapper=writer_wrapper_sync,
+                is_async=False,
+            )
+            return writer_wrapper_sync  # type: ignore
+
+        return decorator
+
+    @classmethod
+    def get_reader(
+        cls,
+        key: str,
+        interval_seconds: int,
+        ttl: int | None = None,
+        *,
+        run_immediately: bool = True,
+        on_error: Callable[[Exception], None] | None = None,
+        cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+    ) -> Callable[[], T | None]:
+        cache_key = key
+
+        if interval_seconds <= 0:
+            interval_seconds = 0
+        if ttl is None and interval_seconds > 0:
+            ttl = interval_seconds * 2
+        if ttl is None:
+            ttl = 0
+
+        # Source cache (shared/distributed) to pull from; local_cache used for fast reads.
+        source_cache_factory = normalize_cache_factory(
+            cache, default_factory=InMemCache
+        )
+        source_cache = source_cache_factory()
+        local_cache = InMemCache()
+        source_get = source_cache.get
+        local_get = local_cache.get
+        local_set = local_cache.set
+
+        def load_once() -> None:
+            try:
+                value = source_get(cache_key)
+                if value is not None:
+                    local_set(cache_key, value, ttl)
+            except Exception as e:  # pragma: no cover - defensive
+                if on_error:
+                    try:
+                        on_error(e)
+                    except Exception:
+                        logger.exception(
+                            "BGCache reader on_error failed for key %r", cache_key
+                        )
+                else:
+                    logger.exception(
+                        "BGCache reader refresh failed for key %r", cache_key
+                    )
+
+        if run_immediately and (interval_seconds > 0 or ttl > 0):
+            load_once()
+
+        if interval_seconds > 0:
+            scheduler_sync = SharedScheduler.get_scheduler()
+            SharedScheduler.start()
+            scheduler_sync.add_job(
+                load_once,
+                trigger=IntervalTrigger(seconds=interval_seconds),
+                id=f"reader:{cache_key}",
+                replace_existing=True,
+            )
+
+        def read_only_reader() -> T | None:
+            value = local_get(cache_key)
+            if value is not None:
+                return value
+            # Fallback: pull once from source on demand if not already cached.
+            load_once()
+            return local_get(cache_key)
+
+        attach_wrapper_metadata(
+            read_only_reader,
+            read_only_reader,
+            cache_obj=local_cache,
+            cache_key=cache_key,
+        )
+        return read_only_reader  # type: ignore
+
 
 BGCache = AsyncBackgroundCache
+
+
+@dataclass(slots=True)
+class _WriterRecord:
+    cache_key: str
+    cache: CacheStorage
+    ttl: int
+    loader_wrapper: Callable[[], Any] | Callable[[], Any]
+    is_async: bool
