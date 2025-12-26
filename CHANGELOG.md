@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2-beta] - 2025-12-25
+
+### Added
+- **LocalFileCache**: filesystem-backed storage with TTL, atomic writes, optional compression, and dedupe to skip identical rewrites.
+- **ChainCache**: composable multi-level cache (e.g., InMem -> Redis -> S3/GCS/local file) with read-through promotion and write-through semantics.
+- **Dedupe writes**: opt-in for RedisCache, S3Cache, GCSCache, and LocalFileCache to avoid rewriting unchanged payloads.
+- **Docs**: production-grade BGCache writer/reader guide (`docs/bgcache.md`) now shows Single-Writer/Multi-Reader with ChainCache cold tiers (S3/GCS/LocalFileCache) and per-process readers.
+- README updates for ChainCache, dedupe_writes, LocalFileCache.
+- **Tests**: integration coverage for LocalFileCache (TTL expiry, dedupe, decorator usage, ChainCache integration).
+- **Refactor**: storage backends split into `advanced_caching.storage` package (per-backend modules) while preserving public exports.
+
+### Fixed
+- Redis dedupe now extends TTL when skipping identical writes.
+- SharedAsyncScheduler uses current event loop when available (stability for async BGCache).
+
 ## [0.2.1] - 2025-12-25
 
 ### Fixed
@@ -13,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `configure()` class method on all decorators to easily create pre-configured cache instances (e.g., `MyCache = TTLCache.configure(cache=RedisCache(...))`).
+- **Object Storage Backends**: Added `S3Cache` (AWS) and `GCSCache` (Google Cloud) for cost-effective storage of large objects.
+  - Features: Metadata-based TTL checks (saves download costs), Gzip compression, and pluggable serializers.
 
 ## [0.2.0] - 2025-12-23
 

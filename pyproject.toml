@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "advanced-caching"
-version = "0.2.1"
+version = "0.2.2-beta"
 description = "Production-ready composable caching with TTL, SWR, and background refresh patterns for Python."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,11 +33,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-redis = ["redis>=5.0"]
+redis = ["redis>=5.0.0"]
 dev = [
     "pytest>=8.2",
     "pytest-cov>=4.0",
 ]
+tests = ["pytest", "pytest-asyncio", "pytest-cov"]
+tests-s3 = ["moto[boto3]>=5.0.0"]
+tests-gcs = ["google-cloud-storage>=2.10.0"]
 
 [project.urls]
 Homepage = "https://github.com/agkloop/advanced_caching"
@@ -61,3 +64,6 @@ python_files = ["test_*.py"]
 addopts = "-v"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: marks tests that require external emulators/services"
+]

@@ -19,6 +19,7 @@ Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
   - [InMemCache](#inmemcache)
   - [RedisCache & Serializers](#rediscache--serializers)
   - [HybridCache (L1 + L2)](#hybridcache-l1--l2)
+  - [ChainCache (multi-level)](#chaincache-multi-level)
   - [Custom Storage](#custom-storage)
 - [API Reference](#api-reference)
 - [Testing & Benchmarks](#testing--benchmarks)
@@ -26,6 +27,8 @@ Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
 - [Comparison](#comparison)
 - [Contributing](#contributing)
 - [License](#license)
+- [BGCache (Background)](#bgcache-background)
+  - [Production example](docs/bgcache.md)
 
 ---
 
@@ -106,6 +109,14 @@ The library supports smart key generation that handles both positional and keywo
 
 ## Storage Backends
 
+- InMemCache (default): Fast, process-local
+- RedisCache: Distributed in-memory
+- HybridCache: L1 (memory) + L2 (Redis)
+- ChainCache: Arbitrary multi-level chain (e.g., InMem -> Redis -> S3/GCS)
+- S3Cache: Object storage backend (AWS)
+- GCSCache: Object storage backend (Google Cloud)
+- LocalFileCache: Filesystem-backed cache (per-host)
+
 ### InMemCache
 
 Thread-safe in-memory cache with TTL.
@@ -135,23 +146,6 @@ client = redis.Redis(host="localhost", port=6379)
 cache = RedisCache(client, prefix="app:")
 json_cache = RedisCache(client, prefix="app:json:", serializer="json")
 custom_json = RedisCache(client, prefix="app:json2:", serializer=JsonSerializer())
-```
-
-#### Custom Serializer Example (msgpack)
-
-```python
-import msgpack
-
-class MsgpackSerializer:
-    handles_entries = False
-
-    @staticmethod
-    def dumps(obj):
-        return msgpack.packb(obj, use_bin_type=True)
-
-    @staticmethod
-    def loads(data):
-        return msgpack.unpackb(data, raw=False)
 ```
 
 ---
@@ -229,87 +223,115 @@ db_host = load_config_map().get("db", {}).get("host")
 
 ---
 
-## Advanced Configuration
-
-To avoid repeating complex cache configurations (like HybridCache setup) in every decorator, you can create a pre-configured cache instance.
+### ChainCache (multi-level)
 
 ```python
-from advanced_caching import SWRCache, HybridCache, InMemCache, RedisCache
+from advanced_caching import InMemCache, RedisCache, S3Cache, ChainCache
 
-# 1. Define your cache factory
-def create_hybrid_cache():
-    return HybridCache(
-        l1_cache=InMemCache(),
-        l2_cache=RedisCache(redis_client),
-        l1_ttl=300,
-        l2_ttl=3600
-    )
+chain = ChainCache([
+    (InMemCache(), 60),                    # L1 fast
+    (RedisCache(redis_client), 300),       # L2 distributed
+    (S3Cache(bucket="my-cache"), 3600),   # L3 durable
+])
 
-# 2. Create a configured decorator
-MySWRCache = SWRCache.configure(cache=create_hybrid_cache)
+# Write-through all levels (per-level TTL caps applied)
+chain.set("user:123", {"name": "Ana"}, ttl=900)
 
-# 3. Use it cleanly
-@MySWRCache.cached("users:{}", ttl=300)
-def get_users(code: str):
-    return db.get_users(code)
+# Read-through with promotion to faster levels
+user = chain.get("user:123")
 ```
 
-This works for `TTLCache`, `SWRCache`, and `BGCache`.
+Notes:
+- Provide per-level TTL caps in the tuple; if `None`, the passed `ttl` is used.
+- `set_if_not_exists` delegates atomicity to the deepest level and backfills upper levels on success.
+- `get`/`get_entry` promote hits upward for hotter reads.
 
 ---
 
-### Custom Storage
+### Object Storage Backends (S3/GCS)
 
-Implement the `CacheStorage` protocol.
+Store large cached objects cheaply in AWS S3 or Google Cloud Storage.
+Supports compression and metadata-based TTL checks to minimize costs.
 
-#### File-based example
+**[📚 Full Documentation & Best Practices](docs/object-storage-caching.md)**
 
 ```python
-import json, time
-from pathlib import Path
-from advanced_caching import CacheEntry, CacheStorage, TTLCache, validate_cache_storage
+from advanced_caching import S3Cache, GCSCache
 
-class FileCache(CacheStorage):
-    def __init__(self, directory="/tmp/cache"):
-        self.dir = Path(directory)
-        self.dir.mkdir(parents=True, exist_ok=True)
+user_cache = S3Cache(
+    bucket="my-cache-bucket",
+    prefix="users/",
+    serializer="json",
+    compress=True,
+    dedupe_writes=True,  # optional: skip uploads when content unchanged (adds HEAD)
+)
 
-    def _path(self, key: str) -> Path:
-        return self.dir / f"{key.replace(':','_')}.json"
-
-    def get_entry(self, key):
-        p = self._path(key)
-        if not p.exists():
-            return None
-        data = json.loads(p.read_text())
-        return CacheEntry(**data)
-
-    def set_entry(self, key, entry, ttl=None):
-        self._path(key).write_text(json.dumps(entry.__dict__))
-
-    def get(self, key):
-        e = self.get_entry(key)
-        return e.value if e and e.is_fresh() else None
-
-    def set(self, key, value, ttl=0):
-        now = time.time()
-        self.set_entry(key, CacheEntry(value, now + ttl, now))
-
-    def delete(self, key):
-        self._path(key).unlink(missing_ok=True)
-
-    def exists(self, key):
-        return self.get(key) is not None
-
-    def set_if_not_exists(self, key, value, ttl):
-        if self.exists(key):
-            return False
-        self.set(key, value, ttl)
-        return True
-
-cache = FileCache()
-assert validate_cache_storage(cache)
+gcs_cache = GCSCache(
+    bucket="my-cache-bucket",
+    prefix="users/",
+    serializer="json",
+    compress=True,
+    dedupe_writes=True,  # optional: skip uploads when content unchanged (adds metadata check)
+)
 ```
+
+### RedisCache dedupe_writes
+
+`RedisCache(..., dedupe_writes=True)` compares the serialized payload to the stored value; if unchanged, it skips rewriting and only refreshes TTL when provided.
+
+### LocalFileCache (filesystem)
+
+```python
+from advanced_caching import LocalFileCache
+
+cache = LocalFileCache("/var/tmp/ac-cache", dedupe_writes=True)
+cache.set("user:123", {"name": "Ana"}, ttl=300)
+user = cache.get("user:123")
+```
+
+Notes: one file per key; atomic writes; optional compression and dedupe to skip rewriting identical content.
+
+---
+
+## BGCache (Background)
+
+Single-writer/multi-reader pattern with background refresh and optional independent reader caches.
+
+```python
+from advanced_caching import BGCache, InMemCache
+
+# Writer: enforced single registration per key; refreshes cache on a schedule
+@BGCache.register_writer(
+    "daily_config",
+    interval_seconds=300,   # refresh every 5 minutes
+    ttl=None,               # defaults to interval*2
+    run_immediately=True,
+    cache=InMemCache(),     # or RedisCache / ChainCache
+)
+def load_config():
+    return expensive_fetch()
+
+# Readers: read-only; keep a local cache warm by pulling from the writer's cache
+reader = BGCache.get_reader(
+    "daily_config",
+    interval_seconds=60,    # periodically pull from source cache into local cache
+    ttl=None,               # local cache TTL defaults to interval*2
+    run_immediately=True,
+    cache=InMemCache(),     # local cache for this process
+)
+
+# Usage
+cfg = reader()   # returns value from local cache; on miss pulls once from source cache
+```
+
+Notes:
+- `register_writer` enforces one writer per key globally; raises if duplicate.
+- `interval_seconds` <= 0 disables scheduling; wrapper still writes-on-demand on misses.
+- `run_immediately=True` triggers an initial refresh if the cache is empty.
+- `get_reader` creates a read-only accessor backed by its own cache; it pulls from the provided cache (usually the writer’s cache) and optionally keeps it warm on a schedule.
+- Use `cache=` on readers to override the local cache backend (e.g., InMemCache in each process) while sourcing data from the writer’s cache backend.
+
+See `docs/bgcache.md` for a production-grade example with Redis/ChainCache, error handling, and reader-local caches.
 
 ---
 
@@ -353,15 +375,17 @@ uv run python tests/benchmark.py
 
 ## Comparison
 
-| Feature            | advanced-caching | lru_cache | cachetools | Redis  | Memcached |
-| ------------------ | ---------------- | --------- | ---------- | ------ | --------- |
-| TTL                | ✅                | ❌         | ✅          | ✅      | ✅         |
-| SWR                | ✅                | ❌         | ❌          | Manual | Manual    |
-| Background refresh | ✅                | ❌         | ❌          | Manual | Manual    |
-| Custom backends    | ✅                | ❌         | ❌          | N/A    | N/A       |
-| Distributed        | ✅                | ❌         | ❌          | ✅      | ✅         |
-| Async support      | ✅                | ❌         | ❌          | ✅      | ✅         |
-| Type hints         | ✅                | ✅         | ✅          | ❌      | ❌         |
+| Feature             | advanced-caching | lru_cache | cachetools | Redis  | Memcached |
+| ------------------- | ---------------- | --------- | ---------- | ------ | --------- |
+| TTL                 | ✅                | ❌         | ✅          | ✅      | ✅         |
+| SWR                 | ✅                | ❌         | ❌          | Manual | Manual    |
+| Background refresh  | ✅                | ❌         | ❌          | Manual | Manual    |
+| Custom backends     | ✅ (InMem/Redis/S3/GCS/Chain) | ❌ | ❌ | N/A | N/A |
+| Distributed         | ✅ (Redis, ChainCache) | ❌ | ❌ | ✅ | ✅ |
+| Multi-level chain   | ✅ (ChainCache)  | ❌         | ❌          | Manual | Manual    |
+| Dedupe writes       | ✅ (Redis/S3/GCS opt-in) | ❌ | ❌ | Manual | Manual |
+| Async support       | ✅                | ❌         | ❌          | ✅      | ✅         |
+| Type hints          | ✅                | ✅         | ✅          | ❌      | ❌         |
 
 ---
 

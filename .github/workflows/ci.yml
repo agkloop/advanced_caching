@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv pip install .[tests]
+      - name: Run unit tests
+        run: pytest -q
+
+  s3-integration:
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        command: server /data --console-address :9001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv pip install .[tests tests-s3]
+      - name: Configure MinIO bucket
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+          S3_ENDPOINT_URL: http://localhost:9000
+        run: |
+          python - <<'PY'
+import boto3
+import os
+s3 = boto3.client(
+    "s3",
+    endpoint_url=os.environ["S3_ENDPOINT_URL"],
+    aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+    aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    region_name=os.environ["AWS_REGION"],
+)
+for name in ["test-bkt", "test-bkt2", "test-bkt-swr", "test-bkt-chain"]:
+    try:
+        s3.create_bucket(Bucket=name)
+    except Exception:
+        pass
+PY
+      - name: Run S3 integration tests
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+          S3_ENDPOINT_URL: http://localhost:9000
+        run: pytest -q tests/test_s3_cache_integration.py
+
+  gcs-integration:
+    runs-on: ubuntu-latest
+    services:
+      fake-gcs:
+        image: fsouza/fake-gcs-server:latest
+        ports:
+          - 4443:4443
+        options: >-
+          --health-cmd "curl -f http://localhost:4443/storage/v1/b || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        command: ["-scheme", "http", "-public-host", "localhost:4443"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv pip install .[tests tests-gcs]
+      - name: Run GCS integration tests
+        env:
+          STORAGE_EMULATOR_HOST: http://localhost:4443
+        run: pytest -q -m integration tests/test_gcs_cache_integration.py
