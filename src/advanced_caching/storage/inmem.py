@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from typing import Any
@@ -13,6 +14,7 @@ class InMemCache:
     def __init__(self):
         self._data: dict[str, CacheEntry] = {}
         self._lock = threading.RLock()
+        self._memory_tracking_enabled = False
 
     def _make_entry(self, value: Any, ttl: int) -> CacheEntry:
         now = time.time()
@@ -75,3 +77,49 @@ class InMemCache:
     @property
     def lock(self):
         return self._lock
+
+    def get_memory_usage(self) -> dict[str, Any]:
+        """
+        Calculate approximate memory usage of the cache.
+
+        Returns:
+            dict with keys:
+                - bytes_used: Estimated memory usage in bytes
+                - entry_count: Number of entries in cache
+                - avg_entry_size: Average size per entry in bytes
+
+        Note: This is an approximation using sys.getsizeof() which doesn't
+        account for shared object references. For production monitoring,
+        consider enabling memory tracking which provides more accurate estimates.
+        """
+        with self._lock:
+            if not self._data:
+                return {
+                    "bytes_used": 0,
+                    "entry_count": 0,
+                    "avg_entry_size": 0,
+                }
+
+            # Calculate total memory usage
+            # Dict overhead + keys + entries
+            total_bytes = sys.getsizeof(self._data)
+
+            for key, entry in self._data.items():
+                # Key size
+                total_bytes += sys.getsizeof(key)
+                # Entry object overhead
+                total_bytes += sys.getsizeof(entry)
+                # Entry value (approximate)
+                total_bytes += sys.getsizeof(entry.value)
+                # Entry metadata
+                total_bytes += sys.getsizeof(entry.fresh_until)
+                total_bytes += sys.getsizeof(entry.created_at)
+
+            entry_count = len(self._data)
+            avg_size = total_bytes // entry_count if entry_count > 0 else 0
+
+            return {
+                "bytes_used": total_bytes,
+                "entry_count": entry_count,
+                "avg_entry_size": avg_size,
+            }

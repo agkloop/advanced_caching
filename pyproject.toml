@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "advanced-caching"
-version = "0.2.2-beta"
+version = "0.3.0"
 description = "Production-ready composable caching with TTL, SWR, and background refresh patterns for Python."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,21 @@ dev = [
 tests = ["pytest", "pytest-asyncio", "pytest-cov"]
 tests-s3 = ["moto[boto3]>=5.0.0"]
 tests-gcs = ["google-cloud-storage>=2.10.0"]
+
+# Metrics exporters (optional)
+metrics = []  # Metapackage for core metrics (in-memory collector, no external dependencies)
+opentelemetry = [
+    "opentelemetry-api>=1.39.1",
+    "opentelemetry-sdk>=1.39.1",
+]
+gcp-monitoring = ["google-cloud-monitoring>=2.28.0"]
+
+# Convenience extra for all supported exporters
+all-metrics = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "google-cloud-monitoring>=2.15.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/agkloop/advanced_caching"

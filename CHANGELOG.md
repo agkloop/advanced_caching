@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-01-02
+
+### Added
+- **Metrics System**: Comprehensive, production-ready metrics collection with <1% overhead
+  - `InMemoryMetrics`: Built-in thread-safe collector with zero external dependencies, perfect for REST API endpoints
+  - `OpenTelemetryMetrics`: Native OpenTelemetry exporter with histogram support for industry-standard observability
+  - `GCPCloudMonitoringMetrics`: Google Cloud Monitoring exporter with batched writes, automatic resource detection, and shared APScheduler integration
+  - `InstrumentedStorage`: Wrapper for automatic storage-level metrics tracking
+  - Tracks hits, misses, sets, deletes, hit rates, latency percentiles (p50/p95/p99), errors, memory usage, and background refresh operations
+  - Shared collector pattern: Single `MetricsCollector` instance can track multiple cached functions with per-function breakdown
+  - `NullMetrics` / `NULL_METRICS` for zero-overhead disabled metrics
+  - `MetricsCollector` protocol for custom implementations
+- **GCP Client Sharing**: `GCPCloudMonitoringMetrics` now accepts optional `client` parameter for connection pooling across multiple collectors
+- **Shared Scheduler Integration**: GCP exporter uses `SharedScheduler` instead of dedicated threads for background metric flushing
+- **Documentation**:
+  - `docs/metrics.md`: Comprehensive metrics guide (streamlined to 149 lines)
+  - `docs/custom-metrics-exporters.md`: Production-ready examples for Prometheus, StatsD, and Datadog
+  - `examples/metrics_example.py`: Complete metrics usage patterns
+  - `examples/shared_metrics_example.py`: Shared collector pattern demonstration
+  - `examples/gcp_client_sharing_example.py`: GCP client reuse example
+- **Testing**: 17 comprehensive integration tests covering all decorators (TTL, SWR, BG), async/sync modes, thread safety, and performance overhead validation
+
+### Changed
+- All decorators (`TTLCache`, `SWRCache`, `BGCache`) now accept optional `metrics` parameter
+- `InMemCache` now supports `record_memory_usage()` for tracking cache size
+- README updated with metrics quick start and API reference
+
+### Performance
+- Metrics system benchmarked at <1% overhead for `InMemoryMetrics`
+- <4% overhead for OpenTelemetry exporter
+- <3% overhead for GCP Cloud Monitoring with batched writes
+
 ## [0.2.2-beta] - 2025-12-25
 
 ### Added
@@ -148,7 +180,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `storage.py` coverage improved to ~74%.
 - Ensured all tests pass under the documented `pyproject.toml` configuration.
 
-[Unreleased]: https://github.com/agkloop/advanced_caching/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/agkloop/advanced_caching/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/agkloop/advanced_caching/compare/v0.2.2-beta...v0.3.0
+[0.2.2-beta]: https://github.com/agkloop/advanced_caching/compare/v0.2.1...v0.2.2-beta
+[0.2.1]: https://github.com/agkloop/advanced_caching/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/agkloop/advanced_caching/compare/v0.1.6...v0.2.0
+[0.1.6]: https://github.com/agkloop/advanced_caching/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/agkloop/advanced_caching/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/agkloop/advanced_caching/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/agkloop/advanced_caching/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/agkloop/advanced_caching/compare/v0.1.1...v0.1.2

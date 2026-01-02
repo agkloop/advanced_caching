@@ -14,6 +14,7 @@ Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
 ## Table of Contents
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Metrics & Monitoring](#metrics--monitoring)
 - [Key Templates](#key-templates)
 - [Storage Backends](#storage-backends)
   - [InMemCache](#inmemcache)
@@ -35,8 +36,11 @@ Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
 ## Installation
 
 ```bash
-uv pip install advanced-caching            # core
+uv pip install advanced-caching            # core (includes InMemoryMetrics)
 uv pip install "advanced-caching[redis]"  # Redis support
+uv pip install "advanced-caching[opentelemetry]"  # OpenTelemetry metrics
+uv pip install "advanced-caching[gcp-monitoring]"  # GCP Cloud Monitoring
+uv pip install "advanced-caching[all-metrics]"  # All metrics exporters
 # pip works too
 ````
 
@@ -85,6 +89,42 @@ RedisTTL = TTLCache.configure(cache=RedisCache(redis_client))
 async def get_user_redis(user_id: int):
     return await db.fetch(user_id)
 ```
+
+---
+
+## Metrics & Monitoring
+
+**Optional, high-performance metrics** with <1% overhead for production monitoring.
+
+```python
+from advanced_caching import TTLCache
+from advanced_caching.metrics import InMemoryMetrics
+
+# Create metrics collector (no external dependencies!)
+metrics = InMemoryMetrics()
+
+# Use with any decorator
+@TTLCache.cached("user:{id}", ttl=60, metrics=metrics)
+def get_user(id: int):
+    return {"id": id, "name": "Alice"}
+
+# Query metrics via API
+stats = metrics.get_stats()
+# Returns: hit_rate, latency percentiles (p50/p95/p99),
+# errors, memory usage, background refresh stats
+```
+
+**Built-in collectors:**
+- **InMemoryMetrics**: Zero dependencies, perfect for API queries
+- **NullMetrics**: Zero overhead when metrics disabled (default)
+
+**Exporters (optional):**
+- **OpenTelemetry**: OTLP, Jaeger, Zipkin, Prometheus
+- **GCP Cloud Monitoring**: Google Cloud Platform
+
+**Custom exporters:** See [Custom Exporters Guide](docs/custom-metrics-exporters.md) for Prometheus, StatsD, and Datadog implementations.
+
+📖 **[Full Metrics Documentation](docs/metrics.md)**
 
 ---
 
@@ -290,6 +330,89 @@ user = cache.get("user:123")
 ```
 
 Notes: one file per key; atomic writes; optional compression and dedupe to skip rewriting identical content.
+
+---
+
+### Custom Storage
+
+Implement your own storage backend by following the `CacheStorage` protocol:
+
+```python
+from advanced_caching import CacheStorage, CacheEntry
+from typing import Any
+
+class MyCustomStorage:
+    """Custom cache storage implementation."""
+    
+    def get(self, key: str) -> Any | None:
+        """Retrieve value by key, or None if not found/expired."""
+        ...
+    
+    def get_entry(self, key: str) -> CacheEntry | None:
+        """Retrieve full cache entry with metadata."""
+        ...
+    
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        """Store value with optional TTL in seconds."""
+        ...
+    
+    def set_if_not_exists(self, key: str, value: Any, ttl: int | None = None) -> bool:
+        """Atomic set-if-not-exists. Returns True if set, False if key exists."""
+        ...
+    
+    def delete(self, key: str) -> None:
+        """Remove key from storage."""
+        ...
+    
+    def exists(self, key: str) -> bool:
+        """Check if key exists and is not expired."""
+        ...
+
+# Validate implementation
+from advanced_caching import validate_cache_storage
+validate_cache_storage(MyCustomStorage())
+
+# Use with decorators
+@TTLCache.cached("user:{id}", ttl=60, cache=MyCustomStorage())
+def get_user(id: int):
+    return {"id": id}
+```
+
+**Exposing Metrics:**
+
+To track cache operations in your custom storage, wrap it with `InstrumentedStorage`:
+
+```python
+from advanced_caching.storage import InstrumentedStorage
+from advanced_caching.metrics import InMemoryMetrics
+
+# Create metrics collector
+metrics = InMemoryMetrics()
+
+# Wrap your custom storage
+instrumented = InstrumentedStorage(
+    storage=MyCustomStorage(),
+    metrics=metrics,
+    cache_name="my_custom_cache"
+)
+
+# Use instrumented storage
+@TTLCache.cached("user:{id}", ttl=60, cache=instrumented)
+def get_user(id: int):
+    return {"id": id}
+
+# Query metrics
+stats = metrics.get_stats()
+# Includes: hits, misses, latency, errors, memory usage for "my_custom_cache"
+```
+
+`InstrumentedStorage` automatically tracks:
+- All cache operations (get, set, delete)
+- Operation latency (p50/p95/p99 percentiles)
+- Errors with exception types
+- Memory usage (if your storage supports it)
+
+See [Metrics Documentation](docs/metrics.md) for details.
 
 ---
 
