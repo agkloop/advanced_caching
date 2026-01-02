@@ -104,7 +104,7 @@ Returns nested dictionary structure:
 }
 ```
 
-**Note:** Memory metrics are tracked **per-cache-name** when using `InstrumentedStorage` wrapper. If you have multiple functions sharing the same metrics collector but using different storage backends, each will have its own memory entry under the cache name you provide to `InstrumentedStorage(storage, metrics, "cache_name")`.
+**Note:** Metrics are tracked **per-cache-name** when using `InstrumentedStorage` wrapper. If you have multiple functions sharing the same metrics collector but using different storage backends, each will have its own memory entry under the cache name you provide to `InstrumentedStorage(storage, metrics, "cache_name")`.
 
 ### OpenTelemetry
 Metric names follow OpenTelemetry conventions:
