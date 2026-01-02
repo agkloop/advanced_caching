@@ -21,7 +21,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from ._decorator_common import attach_wrapper_metadata, normalize_cache_factory
 from ._schedulers import SharedAsyncScheduler, SharedScheduler
-from .storage import CacheEntry, CacheStorage, InMemCache
+from .metrics import MetricsCollector, NULL_METRICS
+from .storage import CacheEntry, CacheStorage, InMemCache, InstrumentedStorage
 
 T = TypeVar("T")
 
@@ -167,6 +168,7 @@ class AsyncTTLCache:
         key: str | Callable[..., str],
         ttl: int,
         cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+        metrics: MetricsCollector | None = None,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         Cache decorator with TTL.
@@ -175,12 +177,21 @@ class AsyncTTLCache:
             key: Cache key template (e.g., "user:{}") or generator function
             ttl: Time-to-live in seconds
             cache: Optional cache backend (defaults to InMemCache)
+            metrics: Optional metrics collector for instrumentation
         """
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             key_fn = _create_smart_key_fn(key, func)
             cache_obj = cache_factory()
+
+            # Wrap cache with instrumentation if metrics are provided
+            if metrics is not None:
+                cache_name = func.__name__
+                cache_obj = InstrumentedStorage(
+                    cache_obj, metrics, cache_name, {"decorator": "TTLCache"}
+                )
+
             cache_get_entry = cache_obj.get_entry
             cache_set = cache_obj.set
             now_fn = time.time
@@ -277,12 +288,32 @@ class AsyncStaleWhileRevalidateCache:
         stale_ttl: int = 0,
         cache: CacheStorage | Callable[[], CacheStorage] | None = None,
         enable_lock: bool = True,
+        metrics: MetricsCollector | None = None,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
+        """
+        SWR cache decorator.
+
+        Args:
+            key: Cache key template or generator function
+            ttl: Fresh time in seconds
+            stale_ttl: Additional stale time in seconds (0 = no stale period)
+            cache: Optional cache backend (defaults to InMemCache)
+            enable_lock: Whether to use locking for refresh coordination
+            metrics: Optional metrics collector for instrumentation
+        """
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             key_fn = _create_smart_key_fn(key, func)
             cache_obj = cache_factory()
+
+            # Wrap cache with instrumentation if metrics are provided
+            if metrics is not None:
+                cache_name = func.__name__
+                cache_obj = InstrumentedStorage(
+                    cache_obj, metrics, cache_name, {"decorator": "SWRCache"}
+                )
+
             get_entry = cache_obj.get_entry
             set_entry = cache_obj.set_entry
             set_if_not_exists = cache_obj.set_if_not_exists
@@ -333,6 +364,8 @@ class AsyncStaleWhileRevalidateCache:
                             return entry.value
 
                     async def refresh_job() -> None:
+                        refresh_start = time.perf_counter()
+                        success = False
                         try:
                             new_value = await func(*args, **kwargs)
                             refreshed_at = now_fn()
@@ -344,11 +377,21 @@ class AsyncStaleWhileRevalidateCache:
                                     created_at=refreshed_at,
                                 ),
                             )
+                            success = True
                         except Exception:
                             logger.exception(
                                 "Async SWR background refresh failed for key %r",
                                 cache_key,
                             )
+                        finally:
+                            if metrics is not None:
+                                refresh_duration = time.perf_counter() - refresh_start
+                                metrics.record_background_refresh(
+                                    func.__name__,
+                                    success,
+                                    refresh_duration,
+                                    {"decorator": "SWRCache", "key": cache_key},
+                                )
 
                     create_task(refresh_job())
                     return entry.value
@@ -399,6 +442,8 @@ class AsyncStaleWhileRevalidateCache:
                         return entry.value
 
                 def refresh_job() -> None:
+                    refresh_start = time.perf_counter()
+                    success = False
                     try:
                         new_value = func(*args, **kwargs)
                         refreshed_at = now_fn()
@@ -410,10 +455,20 @@ class AsyncStaleWhileRevalidateCache:
                                 created_at=refreshed_at,
                             ),
                         )
+                        success = True
                     except Exception:
                         logger.exception(
                             "Sync SWR background refresh failed for key %r", cache_key
                         )
+                    finally:
+                        if metrics is not None:
+                            refresh_duration = time.perf_counter() - refresh_start
+                            metrics.record_background_refresh(
+                                func.__name__,
+                                success,
+                                refresh_duration,
+                                {"decorator": "SWRCache", "key": cache_key},
+                            )
 
                 # Run refresh in background using SharedScheduler
                 scheduler = SharedScheduler.get_scheduler()
@@ -490,7 +545,20 @@ class AsyncBackgroundCache:
         run_immediately: bool = True,
         on_error: Callable[[Exception], None] | None = None,
         cache: CacheStorage | Callable[[], CacheStorage] | None = None,
+        metrics: MetricsCollector | None = None,
     ) -> Callable[[Callable[[], T]], Callable[[], T]]:
+        """
+        Register a background loader function.
+
+        Args:
+            key: Cache key for the loaded data
+            interval_seconds: Refresh interval in seconds (0 = no background refresh)
+            ttl: Optional TTL for cached data (defaults to 2x interval_seconds)
+            run_immediately: Whether to load data immediately on first access
+            on_error: Optional error handler callback
+            cache: Optional cache backend (defaults to InMemCache)
+            metrics: Optional metrics collector for instrumentation
+        """
         cache_key = key
         if interval_seconds <= 0:
             interval_seconds = 0
@@ -501,6 +569,13 @@ class AsyncBackgroundCache:
 
         cache_factory = normalize_cache_factory(cache, default_factory=InMemCache)
         cache_obj = cache_factory()
+
+        # Wrap cache with instrumentation if metrics are provided
+        if metrics is not None:
+            cache_obj = InstrumentedStorage(
+                cache_obj, metrics, cache_key, {"decorator": "BGCache"}
+            )
+
         cache_get = cache_obj.get
         cache_set = cache_obj.set
 
@@ -524,9 +599,12 @@ class AsyncBackgroundCache:
                     return async_wrapper  # type: ignore
 
                 async def refresh_job() -> None:
+                    refresh_start = time.perf_counter()
+                    success = False
                     try:
                         data = await loader_func()
                         cache_set(cache_key, data, ttl)
+                        success = True
                     except Exception as e:
                         if on_error:
                             try:
@@ -539,6 +617,15 @@ class AsyncBackgroundCache:
                         else:
                             logger.exception(
                                 "Async BGCache refresh job failed for key %r", cache_key
+                            )
+                    finally:
+                        if metrics is not None:
+                            refresh_duration = time.perf_counter() - refresh_start
+                            metrics.record_background_refresh(
+                                cache_key,
+                                success,
+                                refresh_duration,
+                                {"decorator": "BGCache", "key": cache_key},
                             )
 
                 next_run_time: datetime | None = None
@@ -623,9 +710,12 @@ class AsyncBackgroundCache:
                 return sync_wrapper
 
             def sync_refresh_job() -> None:
+                refresh_start = time.perf_counter()
+                success = False
                 try:
                     data = loader_func()
                     cache_set(cache_key, data, ttl)
+                    success = True
                 except Exception as e:
                     if on_error:
                         try:
@@ -638,6 +728,15 @@ class AsyncBackgroundCache:
                     else:
                         logger.exception(
                             "Sync BGCache refresh job failed for key %r", cache_key
+                        )
+                finally:
+                    if metrics is not None:
+                        refresh_duration = time.perf_counter() - refresh_start
+                        metrics.record_background_refresh(
+                            cache_key,
+                            success,
+                            refresh_duration,
+                            {"decorator": "BGCache", "key": cache_key},
                         )
 
             next_run_time_sync: datetime | None = None

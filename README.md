@@ -14,6 +14,7 @@ Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
 ## Table of Contents
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Metrics & Monitoring](#metrics--monitoring)
 - [Key Templates](#key-templates)
 - [Storage Backends](#storage-backends)
   - [InMemCache](#inmemcache)
@@ -35,8 +36,11 @@ Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
 ## Installation
 
 ```bash
-uv pip install advanced-caching            # core
+uv pip install advanced-caching            # core (includes InMemoryMetrics)
 uv pip install "advanced-caching[redis]"  # Redis support
+uv pip install "advanced-caching[opentelemetry]"  # OpenTelemetry metrics
+uv pip install "advanced-caching[gcp-monitoring]"  # GCP Cloud Monitoring
+uv pip install "advanced-caching[all-metrics]"  # All metrics exporters
 # pip works too
 ````
 
@@ -85,6 +89,42 @@ RedisTTL = TTLCache.configure(cache=RedisCache(redis_client))
 async def get_user_redis(user_id: int):
     return await db.fetch(user_id)
 ```
+
+---
+
+## Metrics & Monitoring
+
+**Optional, high-performance metrics** with <1% overhead for production monitoring.
+
+```python
+from advanced_caching import TTLCache
+from advanced_caching.metrics import InMemoryMetrics
+
+# Create metrics collector (no external dependencies!)
+metrics = InMemoryMetrics()
+
+# Use with any decorator
+@TTLCache.cached("user:{id}", ttl=60, metrics=metrics)
+def get_user(id: int):
+    return {"id": id, "name": "Alice"}
+
+# Query metrics via API
+stats = metrics.get_stats()
+# Returns: hit_rate, latency percentiles (p50/p95/p99),
+# errors, memory usage, background refresh stats
+```
+
+**Built-in collectors:**
+- **InMemoryMetrics**: Zero dependencies, perfect for API queries
+- **NullMetrics**: Zero overhead when metrics disabled (default)
+
+**Exporters (optional):**
+- **OpenTelemetry**: OTLP, Jaeger, Zipkin, Prometheus
+- **GCP Cloud Monitoring**: Google Cloud Platform
+
+**Custom exporters:** See [Custom Exporters Guide](docs/custom-metrics-exporters.md) for Prometheus, StatsD, and Datadog implementations.
+
+📖 **[Full Metrics Documentation](docs/metrics.md)**
 
 ---
 

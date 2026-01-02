@@ -6,6 +6,7 @@ from .utils import (
     _BUILTIN_SERIALIZERS,
     _hash_bytes,
     validate_cache_storage,
+    InstrumentedStorage,
 )
 from .inmem import InMemCache
 from .redis_cache import RedisCache
@@ -23,6 +24,7 @@ __all__ = [
     "_BUILTIN_SERIALIZERS",
     "_hash_bytes",
     "validate_cache_storage",
+    "InstrumentedStorage",
     "InMemCache",
     "RedisCache",
     "HybridCache",
