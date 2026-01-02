@@ -5,9 +5,10 @@ Optional metrics system with <1% overhead. Tracks hits, misses, latency, errors,
 ## Installation
 
 ```bash
-pip install advanced-caching  # Includes InMemoryMetrics
+
+uv pip install "advanced-caching"  # Includes InMemoryMetrics
 pip install "advanced-caching[opentelemetry]"  # OpenTelemetry
-pip install "advanced-caching[gcp-monitoring]"  # GCP Cloud Monitoring
+uv pip install "advanced-caching[gcp-monitoring]"  # GCP Cloud Monitoring
 ```
 
 ## Quick Start
