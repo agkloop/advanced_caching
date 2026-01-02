@@ -31,13 +31,19 @@ jobs:
     - name: Create virtual environment and install dependencies
       run: |
         uv venv
-        uv pip install -e ".[dev]"
+        uv pip install -e ".[dev,redis]"
 
     - name: Check code formatting with ruff
       run: uv run ruff format --check src/ tests/
 
     - name: Run unit tests
       run: uv run pytest tests/test_correctness.py -v --tb=short
+
+    - name: Setup Docker (for testcontainers)
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      run: |
+        # Docker is already installed on ubuntu-latest runners
+        docker --version
 
     - name: Run integration tests (Redis with testcontainers)
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
