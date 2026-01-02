@@ -394,6 +394,52 @@ def test_instrumented_storage_memory_usage():
     assert metrics.memory_usages[0][2] == 2  # entry_count
 
 
+def test_memory_metrics_per_cache_name():
+    """Test that memory metrics are tracked separately per cache name."""
+    from advanced_caching.metrics import InMemoryMetrics
+
+    metrics = InMemoryMetrics()
+
+    # Create two separate caches with different names
+    cache1 = InMemCache()
+    instrumented1 = InstrumentedStorage(cache1, metrics, "cache_one")
+
+    cache2 = InMemCache()
+    instrumented2 = InstrumentedStorage(cache2, metrics, "cache_two")
+
+    # Add data to first cache
+    instrumented1.set("key1", "x" * 1000, ttl=60)
+    instrumented1.set("key2", "y" * 2000, ttl=60)
+
+    # Add data to second cache
+    instrumented2.set("key1", "a" * 500, ttl=60)
+
+    # Get memory usage for each cache
+    usage1 = instrumented1.get_memory_usage()
+    usage2 = instrumented2.get_memory_usage()
+
+    # Get stats from shared metrics collector
+    stats = metrics.get_stats()
+
+    # Verify memory is tracked per cache name
+    assert "memory" in stats
+    assert "cache_one" in stats["memory"]
+    assert "cache_two" in stats["memory"]
+
+    # Verify each cache has its own memory stats
+    assert stats["memory"]["cache_one"]["entries"] == 2
+    assert stats["memory"]["cache_two"]["entries"] == 1
+
+    # Verify bytes are different for each cache
+    assert stats["memory"]["cache_one"]["bytes"] > stats["memory"]["cache_two"]["bytes"]
+    assert stats["memory"]["cache_one"]["mb"] > 0
+    assert stats["memory"]["cache_two"]["mb"] > 0
+
+    print(f"\n✓ Memory metrics tracked separately:")
+    print(f"  - cache_one: {stats['memory']['cache_one']}")
+    print(f"  - cache_two: {stats['memory']['cache_two']}")
+
+
 def test_metrics_latency_overhead():
     """Benchmark test to ensure metrics add minimal overhead."""
     import timeit

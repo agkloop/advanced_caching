@@ -333,6 +333,89 @@ Notes: one file per key; atomic writes; optional compression and dedupe to skip 
 
 ---
 
+### Custom Storage
+
+Implement your own storage backend by following the `CacheStorage` protocol:
+
+```python
+from advanced_caching import CacheStorage, CacheEntry
+from typing import Any
+
+class MyCustomStorage:
+    """Custom cache storage implementation."""
+    
+    def get(self, key: str) -> Any | None:
+        """Retrieve value by key, or None if not found/expired."""
+        ...
+    
+    def get_entry(self, key: str) -> CacheEntry | None:
+        """Retrieve full cache entry with metadata."""
+        ...
+    
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        """Store value with optional TTL in seconds."""
+        ...
+    
+    def set_if_not_exists(self, key: str, value: Any, ttl: int | None = None) -> bool:
+        """Atomic set-if-not-exists. Returns True if set, False if key exists."""
+        ...
+    
+    def delete(self, key: str) -> None:
+        """Remove key from storage."""
+        ...
+    
+    def exists(self, key: str) -> bool:
+        """Check if key exists and is not expired."""
+        ...
+
+# Validate implementation
+from advanced_caching import validate_cache_storage
+validate_cache_storage(MyCustomStorage())
+
+# Use with decorators
+@TTLCache.cached("user:{id}", ttl=60, cache=MyCustomStorage())
+def get_user(id: int):
+    return {"id": id}
+```
+
+**Exposing Metrics:**
+
+To track cache operations in your custom storage, wrap it with `InstrumentedStorage`:
+
+```python
+from advanced_caching.storage import InstrumentedStorage
+from advanced_caching.metrics import InMemoryMetrics
+
+# Create metrics collector
+metrics = InMemoryMetrics()
+
+# Wrap your custom storage
+instrumented = InstrumentedStorage(
+    storage=MyCustomStorage(),
+    metrics=metrics,
+    cache_name="my_custom_cache"
+)
+
+# Use instrumented storage
+@TTLCache.cached("user:{id}", ttl=60, cache=instrumented)
+def get_user(id: int):
+    return {"id": id}
+
+# Query metrics
+stats = metrics.get_stats()
+# Includes: hits, misses, latency, errors, memory usage for "my_custom_cache"
+```
+
+`InstrumentedStorage` automatically tracks:
+- All cache operations (get, set, delete)
+- Operation latency (p50/p95/p99 percentiles)
+- Errors with exception types
+- Memory usage (if your storage supports it)
+
+See [Metrics Documentation](docs/metrics.md) for details.
+
+---
+
 ## BGCache (Background)
 
 Single-writer/multi-reader pattern with background refresh and optional independent reader caches.
