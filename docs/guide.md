@@ -16,6 +16,7 @@
 8. [Production Patterns](#8-production-patterns)
 9. [Performance Guide](#9-performance-guide)
 10. [Configuration Reference](#10-configuration-reference)
+11. [Examples](#11-examples)
 
 ---
 
@@ -590,19 +591,76 @@ async def get_user(uid: int) -> dict: ...
 async def load_flags() -> dict: ...
 
 stats = metrics.get_stats()
-# {
-#   "caches": {
-#     "get_user": {
-#       "hits": 120, "misses": 5, "hit_rate_percent": 96.0,
-#       "latency_p50_ms": 0.08, "latency_p95_ms": 0.31, "latency_p99_ms": 0.85,
-#       "errors": 0
-#     }
-#   },
-#   "background_refresh": {
-#     "flags": {"success": 12, "failure": 0}
-#   }
-# }
 ```
+
+`get_stats()` returns a structured dict — every section is keyed by `cache_name` (the decorated function's `__name__`, or the `InstrumentedStorage` label you choose):
+
+```python
+{
+  "uptime_seconds": 12.3,
+
+  # per-function hit/miss counters
+  "caches": {
+    "get_user": {
+      "hits": 120, "misses": 5, "sets": 5, "deletes": 0,
+      "hit_rate_percent": 96.0
+    }
+  },
+
+  # per-function, per-operation latency percentiles (ms)
+  "latency": {
+    "get_user.get": {"count": 125, "p50_ms": 0.01, "p95_ms": 0.05, "p99_ms": 0.12, "avg_ms": 0.02},
+    "get_user.set": {"count":   5, "p50_ms": 0.02, "p95_ms": 0.08, "p99_ms": 0.11, "avg_ms": 0.03}
+  },
+
+  # errors keyed as "<cache_name>.<operation>": {"<ErrorType>": count}
+  "errors": {},
+
+  # optional memory snapshot (if backend reports it)
+  "memory": {
+    "get_user": {"bytes": 4096, "entries": 5, "mb": 0.004}
+  },
+
+  # @bg background refresh success/failure counts
+  "background_refresh": {
+    "flags": {"success": 12, "failure": 0}
+  }
+}
+```
+
+### ChainCache — per-layer metrics
+
+Wrapping the whole chain with one `InstrumentedStorage` only gives you totals.  
+Wrap **each layer individually** to get per-tier breakdown:
+
+```python
+from advanced_caching import ChainCache, InMemCache, RedisCache, S3Cache, InMemoryMetrics
+from advanced_caching.storage.utils import InstrumentedStorage
+
+m = InMemoryMetrics()
+
+chain = ChainCache.build(
+    InstrumentedStorage(InMemCache(),        m, "L1:inmem"),   # ← named per layer
+    InstrumentedStorage(RedisCache(r),       m, "L2:redis"),
+    InstrumentedStorage(S3Cache(s3, "bkt"), m, "L3:s3"),
+    ttls=[60, 300, 3600],
+)
+
+@cache(3600, key="catalog:{page}", store=chain)
+async def get_catalog(page: int) -> list: ...
+```
+
+`m.get_stats()["caches"]` then shows hit rates per tier — so you can immediately see whether your L1 is sized correctly or whether most traffic is falling through to Redis/S3:
+
+```
+Layer        hits  misses  sets  hit_rate
+-----------  ----  ------  ----  --------
+L1:inmem       87       5     5      94%
+L2:redis        4       1     1      80%
+L3:s3           1       0     0     100%
+```
+
+> **Reading the table**: a healthy setup has almost all hits at L1. If L2/L3 hit rates are high it means L1 is evicting too early — raise its TTL or increase its size.
 
 ### Custom Metrics Collector
 
@@ -691,10 +749,45 @@ async def get_user(user_id: int) -> dict: ...
 @cache(60, key="order:{user_id}:{order_id}")
 async def get_order(user_id: int, order_id: int) -> dict: ...
 
-# Callable — full control
+# Callable — full Python, no format string limits
 @cache(60, key=lambda uid, role: f"user:{role}:{uid}")
 async def get_user_by_role(uid: int, role: str) -> dict: ...
 ```
+
+### Callable Key Patterns
+
+A callable receives the **exact same `*args, **kwargs`** as the decorated function. Use it when string templates aren't enough:
+
+```python
+# 1. Multi-arg tenant isolation
+@cache(60, key=lambda tenant, resource_id: f"{tenant}:res:{resource_id}")
+async def get_resource(tenant: str, resource_id: int) -> dict: ...
+
+# 2. Conditional prefix (e.g. admin vs public namespace)
+@cache(60, key=lambda resource_id, admin=False: ("admin" if admin else "public") + f":res:{resource_id}")
+async def get_protected(resource_id: int, admin: bool = False) -> dict: ...
+
+# 3. Hash long/arbitrary inputs (raw SQL, long query strings)
+import hashlib
+def _query_key(query: str) -> str:
+    return "query:" + hashlib.sha256(query.encode()).hexdigest()[:16]
+
+@cache(30, key=_query_key)
+async def run_query(query: str) -> list: ...
+
+# 4. Variadic — pick value from positional or keyword
+@cache(300, key=lambda *a, **k: f"i18n:{k.get('lang', a[0] if a else 'en')}")
+async def get_translations(lang: str = "en") -> dict: ...
+
+# 5. Invalidation works identically — callable computes the key to delete
+@cache(60, key=lambda uid: f"u:{uid}")
+def get_user(uid: int) -> dict: ...
+
+get_user.invalidate(42)   # deletes key "u:42"
+get_user.clear()          # wipes entire store
+```
+
+> **Performance**: a simple lambda key skips signature inspection and runs at **~4 M ops/s** — roughly 2.3× faster than a named template (`~1.7 M ops/s`). Avoid calling expensive operations (network, hashing) in the key unless necessary.
 
 ---
 
@@ -875,10 +968,10 @@ def get_order(order_id: int) -> dict:
 
 ```mermaid
 xychart-beta horizontal
-    title "Throughput (M ops/s, Python 3.12, Apple M2)"
-    x-axis ["bg.read local", "InMemCache.get", "@cache sync static", "@cache async static", "@cache SWR stale", "@cache + metrics"]
+    title "Throughput (M ops/s, Python 3.12, Apple M2, N=200k)"
+    x-axis ["bg.read local", "InMemCache.get", "@cache sync static", "@cache async static", "@cache callable λ", "@cache SWR stale", "@cache + metrics"]
     y-axis "M ops/s" 0 --> 12
-    bar [9.0, 9.9, 6.0, 4.9, 2.3, 1.6]
+    bar [7.5, 10.3, 6.0, 4.9, 3.9, 2.9, 1.6]
 ```
 
 ### Hot Path Breakdown (`@cache` sync hit, 100k iterations)
@@ -1019,4 +1112,104 @@ flowchart TD
     WR --> SAME{Same process?}
     SAME -- yes --> AUTO["bg.read(key)  — auto-discovers store"]
     SAME -- no  --> EXPLICIT["bg.read(key, store=redis_store)"]
+```
+
+---
+
+## 11. Examples
+
+All runnable examples live in `examples/`. Each is self-contained and executable with:
+
+```bash
+uv run python examples/<file>.py
+```
+
+### `quickstart.py`
+
+The fastest way to see every feature in one script.
+
+| Section | What it shows |
+|---------|--------------|
+| **TTL Cache** | `@cache(ttl, key="user:{user_id}")` — miss, hit, second key |
+| **SWR** | `@cache(ttl, stale=N)` — serve stale + background refresh |
+| **Background refresh** | `@bg(interval, key=)` — zero-latency reads |
+| **Custom store** | `store=InMemCache()` (swap for `RedisCache` in prod) |
+| **Metrics** | Shared `InMemoryMetrics`, `get_stats()` hit rates |
+| **Invalidation** | `.invalidate(key)` and `.clear()` |
+| **Callable keys** | 5 patterns: simple λ, multi-arg, conditional, hash, varargs |
+
+```bash
+uv run python examples/quickstart.py
+```
+
+---
+
+### `metrics_and_exporters.py`
+
+Deep dive into metrics — how to read the output, custom collectors, and per-layer ChainCache observability.
+
+| Section | What it shows |
+|---------|--------------|
+| **Shared `InMemoryMetrics`** | One collector across multiple functions; `get_stats()` table with hit rates and latency percentiles (p50/p95/p99) |
+| **Custom `PrintMetrics`** | Minimal protocol implementation — logs every hit/miss to stdout |
+| **`NULL_METRICS`** | Zero-overhead no-op; throughput comparison |
+| **ChainCache per-layer** | Wrap each layer (L1:inmem, L2:redis, L3:s3) with `InstrumentedStorage`; watch hits/misses move up the chain as layers fill and evict |
+
+Sample output for the ChainCache section:
+
+```
+[cold start — all layers empty]
+Layer          hits  misses  sets  hit_rate
+-----------   -----  ------  ----  --------
+L1:inmem          0       2     2        0%
+L2:redis          0       2     2        0%
+L3:s3             0       2     2        0%
+
+[L1 evicted — requests fall through to L2]
+L1:inmem          2       4     4       33%
+L2:redis          2       2     2       50%
+L3:s3             0       2     2        0%
+```
+
+```bash
+uv run python examples/metrics_and_exporters.py
+```
+
+---
+
+### `serializers_example.py`
+
+Benchmarks the four serializer strategies on a `LocalFileCache` backend (disk I/O — Redis/InMem would be faster, making the serializer overhead even more visible).
+
+| Serializer | When to use |
+|-----------|------------|
+| `serializers.json` (orjson) | Default — fastest for JSON-safe data |
+| `serializers.pickle` | Any Python object, no schema |
+| `serializers.msgpack` | Large payloads — ~2× more compact than JSON |
+| Custom `MySerializer` | Protobuf, Avro, Arrow, or any `dumps`/`loads` pair |
+
+```bash
+uv run python examples/serializers_example.py
+```
+
+---
+
+### `writer_reader.py`
+
+Demonstrates the **Single-Writer / Multi-Reader** pattern for sharing data across processes (or threads) with zero per-read latency.
+
+```
+Writer refreshes every 100 ms; readers poll from private mirrors.
+
+[writer] refreshed → {'USD': 1.0, 'EUR': 0.92, 'GBP': 0.79, 'ts': 1710...}
+tick 1:  fast_reader={'USD': 1.0, ...}  slow_reader={'USD': 1.0, ...}
+tick 2:  ...
+```
+
+- `bg.write(interval, key=, store=redis_store)` — one writer, runs on a schedule
+- `bg.read(key, interval=, store=redis_store)` — each reader gets a private local mirror, refreshed independently
+- Readers **never block** — they return the last known value from their local copy
+
+```bash
+uv run python examples/writer_reader.py
 ```

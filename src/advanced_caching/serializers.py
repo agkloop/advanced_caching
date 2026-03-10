@@ -207,8 +207,7 @@ def resolve(s: "Serializer | str | None") -> "Serializer":
             return _ALIASES[s]
         except KeyError:
             raise ValueError(
-                f"Unknown serializer alias {s!r}. "
-                f"Valid aliases: {list(_ALIASES)}"
+                f"Unknown serializer alias {s!r}. Valid aliases: {list(_ALIASES)}"
             ) from None
     if callable(getattr(s, "dumps", None)) and callable(getattr(s, "loads", None)):
         return s

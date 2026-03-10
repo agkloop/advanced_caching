@@ -3,6 +3,7 @@ Integration tests for Redis-backed caching.
 Uses testcontainers-python to spin up a real Redis instance for testing.
 """
 
+import pickle
 import pytest
 import time
 import asyncio
@@ -334,7 +335,13 @@ class TestBGCacheWithRedis:
         def on_error(exc):
             errors.append(exc)
 
-        @bg(10, key="failing_loader", store=store, run_immediately=True, on_error=on_error)
+        @bg(
+            10,
+            key="failing_loader",
+            store=store,
+            run_immediately=True,
+            on_error=on_error,
+        )
         async def failing_loader():
             raise ValueError("Simulated failure")
 

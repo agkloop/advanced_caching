@@ -44,7 +44,7 @@ Metrics::
     print(metrics.get_stats())
 """
 
-__version__ = "0.4.0"
+__version__ = "1.0.0"
 
 from ._cache import cache, bg
 from . import serializers

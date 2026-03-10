@@ -5,10 +5,10 @@ import threading
 import time
 from typing import Any
 
-from .utils import CacheEntry
+from .utils import CacheEntry, CacheStorage
 
 
-class InMemCache:
+class InMemCache(CacheStorage):
     """Thread-safe in-memory cache with TTL support.
 
     Hot-path design notes

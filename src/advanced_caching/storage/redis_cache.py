@@ -4,8 +4,13 @@ import math
 import time
 from typing import Any
 
-from .utils import CacheEntry
-from ..serializers import Serializer, pack_entry, unpack_entry, resolve as _resolve_serializer
+from .utils import CacheEntry, CacheStorage
+from ..serializers import (
+    Serializer,
+    pack_entry,
+    unpack_entry,
+    resolve as _resolve_serializer,
+)
 
 try:
     import redis
@@ -13,7 +18,7 @@ except ImportError:  # pragma: no cover - optional
     redis = None  # type: ignore
 
 
-class RedisCache:
+class RedisCache(CacheStorage):
     """Redis-backed cache storage.
 
     Pass any :class:`~advanced_caching.serializers.Serializer` instance, including

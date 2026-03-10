@@ -6,7 +6,7 @@ from typing import Any
 from .utils import CacheEntry, CacheStorage
 
 
-class HybridCache:
+class HybridCache(CacheStorage):
     """Two-level cache: L1 (InMem) + L2 (distributed)."""
 
     def __init__(
@@ -43,7 +43,7 @@ class HybridCache:
         l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
         self.l2.set(key, value, l2_ttl)
 
-    def get_entry(self, key: str) -> CacheEntry | None:
+    def get_entry(self, key: str, now: float | None = None) -> CacheEntry | None:
         entry = (
             self.l1.get_entry(key)
             if self.l1 and hasattr(self.l1, "get_entry")

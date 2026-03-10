@@ -7,11 +7,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .utils import CacheEntry
-from ..serializers import Serializer, pack_entry, unpack_entry, resolve as _resolve_serializer
+from .utils import CacheEntry, CacheStorage
+from ..serializers import (
+    Serializer,
+    pack_entry,
+    unpack_entry,
+    resolve as _resolve_serializer,
+)
 
 
-class LocalFileCache:
+class LocalFileCache(CacheStorage):
     """Filesystem-backed cache with TTL, optional compression, and atomic writes.
 
     Pass any :class:`~advanced_caching.serializers.Serializer` instance.

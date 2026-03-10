@@ -48,7 +48,7 @@ class CacheStorage(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
-    def get_entry(self, key: str) -> CacheEntry | None: ...
+    def get_entry(self, key: str, now: float | None = None) -> CacheEntry | None: ...
 
     def set_entry(
         self, key: str, entry: CacheEntry, ttl: int | float | None = None
@@ -81,7 +81,7 @@ def validate_cache_storage(cache: Any) -> bool:
     )
 
 
-class InstrumentedStorage:
+class InstrumentedStorage(CacheStorage):
     """
     Wrapper that adds metrics collection to any CacheStorage backend.
 

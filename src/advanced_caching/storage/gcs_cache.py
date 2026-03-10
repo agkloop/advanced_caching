@@ -6,8 +6,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .utils import CacheEntry
-from ..serializers import Serializer, pack_entry, unpack_entry, resolve as _resolve_serializer
+from .utils import CacheEntry, CacheStorage
+from ..serializers import (
+    Serializer,
+    pack_entry,
+    unpack_entry,
+    resolve as _resolve_serializer,
+)
 
 try:
     from google.cloud import storage as gcs
@@ -19,7 +24,7 @@ def _hash_bytes(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
-class GCSCache:
+class GCSCache(CacheStorage):
     """Google Cloud Storage-backed cache.
 
     Pass any :class:`~advanced_caching.serializers.Serializer` instance.

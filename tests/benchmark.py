@@ -164,6 +164,56 @@ def bench_with_metrics():
     _row("@cache sync hit + InMemoryMetrics", elapsed, ops)
 
 
+def bench_cache_callable_key():
+    """@cache sync with callable key (lambda) vs named template."""
+    import hashlib
+
+    @cache(3600, key=lambda user_id: f"bench_callable:{user_id}")
+    def fn_lambda(user_id: int) -> dict:
+        return {"id": user_id}
+
+    @cache(3600, key="bench_template:{user_id}")
+    def fn_template(user_id: int) -> dict:
+        return {"id": user_id}
+
+    @cache(
+        3600,
+        key=lambda user_id: (
+            f"bench_hash:{hashlib.md5(str(user_id).encode()).hexdigest()[:8]}"
+        ),
+    )
+    def fn_hash(user_id: int) -> dict:
+        return {"id": user_id}
+
+    fn_lambda(1)
+    fn_template(1)
+    fn_hash(1)
+
+    elapsed, ops = _timer(lambda: fn_lambda(1), N)
+    _row("@cache sync hit (callable λ key)", elapsed, ops)
+
+    elapsed, ops = _timer(lambda: fn_template(1), N)
+    _row("@cache sync hit (template key, same data)", elapsed, ops)
+
+    elapsed, ops = _timer(lambda: fn_hash(1), N)
+    _row("@cache sync hit (callable hash key)", elapsed, ops)
+
+
+def bench_cache_callable_key_async():
+    """@cache async with callable key."""
+
+    @cache(3600, key=lambda tenant, uid: f"bench_async_callable:{tenant}:{uid}")
+    async def fn(tenant: str, uid: int) -> dict:
+        return {"tenant": tenant, "uid": uid}
+
+    async def run():
+        await fn("acme", 1)  # prime
+        elapsed, ops = await _atimer(lambda: fn("acme", 1), N)
+        _row("@cache async hit (callable λ key)", elapsed, ops)
+
+    asyncio.run(run())
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -184,6 +234,13 @@ def main() -> None:
                 bench_cache_async_hit,
                 bench_cache_swr_hit,
                 bench_cache_miss,
+            ],
+        ),
+        (
+            "Callable keys",
+            [
+                bench_cache_callable_key,
+                bench_cache_callable_key_async,
             ],
         ),
         ("Multi-level", [bench_chain_cache]),

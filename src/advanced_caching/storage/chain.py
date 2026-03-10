@@ -6,7 +6,7 @@ from typing import Any
 from .utils import CacheEntry, CacheStorage
 
 
-class ChainCache:
+class ChainCache(CacheStorage):
     """Composable multi-level cache (L1→L2→...→Ln).
 
     On a cache hit the value is promoted to all faster levels so subsequent
@@ -100,7 +100,7 @@ class ChainCache:
     def exists(self, key: str) -> bool:
         return any(cache.exists(key) for cache, _ in self.levels)
 
-    def get_entry(self, key: str) -> CacheEntry | None:
+    def get_entry(self, key: str, now: float | None = None) -> CacheEntry | None:
         hit_entry, hit_index = None, None
         for idx, (cache, lvl_ttl) in enumerate(self.levels):
             if self._has_get_entry[idx]:

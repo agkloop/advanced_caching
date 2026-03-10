@@ -6,7 +6,7 @@
 
 A production-ready Python caching library built around two symbols: `cache` and `bg`.
 
-It supports **TTL**, **Stale-While-Revalidate**, and **Background Refresh** — all in a single decorator that works transparently with both `def` and `async def`. Backends are pluggable (InMemory, Redis, S3, GCS, LocalFile, ChainCache), serialization is swappable (orjson, msgpack, pickle, protobuf, or custom), and metrics can be exported to Prometheus, OpenTelemetry, or GCP Cloud Monitoring. The hot path is lock-free and hits **~6–9 M ops/s** with zero external dependencies on the default config.
+It supports **TTL**, **Stale-While-Revalidate**, and **Background Refresh** — all in a single decorator that works transparently with both `def` and `async def`. Backends are pluggable (InMemory, Redis, S3, GCS, LocalFile, ChainCache), serialization is swappable (orjson, msgpack, pickle, protobuf, or custom), and metrics can be exported to Prometheus, OpenTelemetry, or GCP Cloud Monitoring. The hot path is lock-free and hits **~6–10 M ops/s** with zero external dependencies on the default config.
 
 ```
 pip install advanced-caching
@@ -486,19 +486,36 @@ def fast_fn(x: int) -> int: ...
 
 ## Performance
 
-Measured on Python 3.12, Apple M2, single thread.
+Measured on Python 3.12, Apple M2, single thread, N=200,000 iterations.
+
+**Storage & decorator hot paths**
 
 | Operation | Throughput | Latency |
 |-----------|-----------|---------|
-| `InMemCache.get()` raw | **9.9 M ops/s** | 0.10 µs |
+| `InMemCache.get()` raw | **10.3 M ops/s** | 0.10 µs |
+| `@cache` sync miss (ttl=0) | **7.3 M ops/s** | 0.14 µs |
+| `bg.read()` local hit | **7.5 M ops/s** | 0.13 µs |
 | `@cache` sync hit — static key | **6.0 M ops/s** | 0.17 µs |
 | `@cache` async hit — static key | **4.9 M ops/s** | 0.20 µs |
-| `@cache` sync hit — named key | **1.7 M ops/s** | 0.59 µs |
-| `@cache` SWR stale-serve | **2.3 M ops/s** | 0.43 µs |
-| `bg.read()` local hit | **9.0 M ops/s** | 0.11 µs |
-| `@cache` + InMemoryMetrics | **1.6 M ops/s** | 0.61 µs |
+| `@cache` SWR stale-serve | **2.9 M ops/s** | 0.35 µs |
+| `@cache` ChainCache L1 hit | **2.9 M ops/s** | 0.35 µs |
+| `@cache` sync hit — named template key | **1.7 M ops/s** | 0.59 µs |
+| `@cache` sync hit + InMemoryMetrics | **1.6 M ops/s** | 0.63 µs |
 
-**Key insight:** Named key templates (`"user:{user_id}"`) are ~3.5× slower than static keys (`"feature_flags"`). Use static keys for ultra-hot paths.
+**Callable key strategies**
+
+| Key type | Throughput | Latency | Notes |
+|----------|-----------|---------|-------|
+| `key=lambda uid: f"u:{uid}"` | **3.9 M ops/s** | 0.26 µs | Fastest callable — no inspection |
+| `key=lambda t, uid: f"{t}:{uid}"` (async) | **2.7 M ops/s** | 0.37 µs | Multi-arg async |
+| `key=lambda uid: f"...{md5(uid)}"` | **1.4 M ops/s** | 0.73 µs | Hashing overhead |
+| `key="user:{user_id}"` template | **1.7 M ops/s** | 0.59 µs | Signature-bound template |
+
+**Key insights:**
+- **Static key** (`"feature_flags"`) is the fastest — no key computation at all (~6 M ops/s)
+- **Simple lambda** (`lambda uid: f"u:{uid}"`) is **2.3× faster** than a named template — it skips signature inspection entirely
+- **Hashing in the key** (`md5`, `sha256`) adds ~0.5 µs per call — use only when inputs are unbounded strings
+- **Metrics** add ~0.4 µs per call; use `NULL_METRICS` (default) on ultra-hot paths
 
 ```bash
 uv run python tests/benchmark.py
