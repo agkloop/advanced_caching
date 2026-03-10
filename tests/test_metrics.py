@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from advanced_caching import TTLCache, SWRCache, BGCache
+from advanced_caching import cache, bg
 from advanced_caching.metrics import MetricsCollector, NullMetrics, NULL_METRICS
 from advanced_caching.storage import InMemCache, InstrumentedStorage
 
@@ -209,7 +209,7 @@ def test_ttlcache_with_metrics():
     metrics = MockMetrics()
     call_count = 0
 
-    @TTLCache.cached("user:{}", ttl=60, metrics=metrics)
+    @cache(60, key="user:{}", metrics=metrics)
     def get_user(user_id: int) -> dict:
         nonlocal call_count
         call_count += 1
@@ -223,7 +223,7 @@ def test_ttlcache_with_metrics():
     # Check metrics
     assert len(metrics.misses) == 1  # get_entry miss
     assert metrics.misses[0][0] == "get_user"
-    assert metrics.misses[0][2]["decorator"] == "TTLCache"
+    assert metrics.misses[0][2]["decorator"] == "cache"
 
     assert len(metrics.sets) == 1  # set after miss
     assert metrics.sets[0][0] == "get_user"
@@ -236,7 +236,7 @@ def test_ttlcache_with_metrics():
     # Check hit was recorded
     assert len(metrics.hits) == 1
     assert metrics.hits[0][0] == "get_user"
-    assert metrics.hits[0][2]["decorator"] == "TTLCache"
+    assert metrics.hits[0][2]["decorator"] == "cache"
 
 
 @pytest.mark.asyncio
@@ -245,7 +245,7 @@ async def test_ttlcache_async_with_metrics():
     metrics = MockMetrics()
     call_count = 0
 
-    @TTLCache.cached("user:{}", ttl=60, metrics=metrics)
+    @cache(60, key="user:{}", metrics=metrics)
     async def get_user_async(user_id: int) -> dict:
         nonlocal call_count
         call_count += 1
@@ -275,7 +275,7 @@ def test_swrcache_with_metrics():
     metrics = MockMetrics()
     call_count = 0
 
-    @SWRCache.cached("data:{}", ttl=1, stale_ttl=5, metrics=metrics)
+    @cache(1, stale=5, key="data:{}", metrics=metrics)
     def fetch_data(key: str) -> str:
         nonlocal call_count
         call_count += 1
@@ -312,13 +312,7 @@ async def test_bgcache_with_metrics():
     metrics = MockMetrics()
     call_count = 0
 
-    @BGCache.register_loader(
-        "config_data",
-        interval_seconds=1,
-        ttl=10,
-        run_immediately=True,
-        metrics=metrics,
-    )
+    @bg(1, key="config_data", ttl=10, run_immediately=True, metrics=metrics)
     async def load_config() -> dict:
         nonlocal call_count
         call_count += 1
@@ -445,21 +439,21 @@ def test_metrics_latency_overhead():
     import timeit
 
     # Without metrics
-    @TTLCache.cached("key:{}", ttl=60)
+    @cache(60, key="key:{}")
     def func_no_metrics(key: int) -> int:
         return key * 2
 
     # With metrics (using NullMetrics for true zero overhead test)
     from advanced_caching.metrics import NULL_METRICS
 
-    @TTLCache.cached("key:{}", ttl=60, metrics=NULL_METRICS)
+    @cache(60, key="key:{}", metrics=NULL_METRICS)
     def func_with_null_metrics(key: int) -> int:
         return key * 2
 
     # With MockMetrics (realistic overhead test)
     metrics = MockMetrics()
 
-    @TTLCache.cached("key:{}", ttl=60, metrics=metrics)
+    @cache(60, key="key:{}", metrics=metrics)
     def func_with_mock_metrics(key: int) -> int:
         return key * 2
 
@@ -525,7 +519,7 @@ def test_inmemory_metrics_collector():
     metrics = InMemoryMetrics()
 
     # Test basic cache operations with TTLCache
-    @TTLCache.cached("user:{id}", ttl=60, metrics=metrics)
+    @cache(60, key="user:{id}", metrics=metrics)
     def get_user(id: int):
         return {"id": id, "name": f"User_{id}"}
 
@@ -584,15 +578,15 @@ def test_shared_metrics_collector():
     metrics = InMemoryMetrics()
 
     # Multiple functions using the same collector
-    @TTLCache.cached("user:{id}", ttl=60, metrics=metrics)
+    @cache(60, key="user:{id}", metrics=metrics)
     def get_user(id: int):
         return {"id": id, "name": f"User_{id}"}
 
-    @TTLCache.cached("product:{id}", ttl=300, metrics=metrics)
+    @cache(300, key="product:{id}", metrics=metrics)
     def get_product(id: int):
         return {"id": id, "price": 99.99}
 
-    @SWRCache.cached("config:{key}", ttl=120, stale_ttl=600, metrics=metrics)
+    @cache(120, stale=600, key="config:{key}", metrics=metrics)
     def get_config(key: str):
         return {"key": key, "value": "enabled"}
 
@@ -661,12 +655,12 @@ async def test_shared_metrics_async():
 
     metrics = InMemoryMetrics()
 
-    @TTLCache.cached("async_user:{id}", ttl=60, metrics=metrics)
+    @cache(60, key="async_user:{id}", metrics=metrics)
     async def get_user_async(id: int):
         await asyncio.sleep(0.001)
         return {"id": id, "name": f"User_{id}"}
 
-    @TTLCache.cached("async_product:{id}", ttl=60, metrics=metrics)
+    @cache(60, key="async_product:{id}", metrics=metrics)
     async def get_product_async(id: int):
         await asyncio.sleep(0.001)
         return {"id": id, "price": 99.99}
@@ -697,7 +691,7 @@ def test_inmemory_metrics_thread_safety():
 
     metrics = InMemoryMetrics()
 
-    @TTLCache.cached("item:{id}", ttl=60, metrics=metrics)
+    @cache(60, key="item:{id}", metrics=metrics)
     def get_item(id: int):
         time.sleep(0.001)  # Simulate work
         return {"id": id}
@@ -739,13 +733,8 @@ def test_bgcache_with_inmemory_metrics():
     metrics = InMemoryMetrics()
     call_count = 0
 
-    # Register BGCache with metrics using decorator
-    @BGCache.register_loader(
-        "test_data",
-        interval_seconds=1,  # Refresh every 1 second
-        run_immediately=True,
-        metrics=metrics,
-    )
+    # Register bg with metrics using decorator
+    @bg(1, key="test_data", run_immediately=True, metrics=metrics)
     def data_loader():
         nonlocal call_count
         call_count += 1
@@ -815,13 +804,8 @@ async def test_bgcache_async_with_inmemory_metrics():
     metrics = InMemoryMetrics()
     call_count = 0
 
-    # Register async BGCache with metrics using decorator
-    @BGCache.register_loader(
-        "async_test_data",
-        interval_seconds=1,
-        run_immediately=True,
-        metrics=metrics,
-    )
+    # Register async bg with metrics using decorator
+    @bg(1, key="async_test_data", run_immediately=True, metrics=metrics)
     async def async_data_loader():
         nonlocal call_count
         call_count += 1
@@ -878,25 +862,20 @@ def test_shared_metrics_all_decorators():
 
     metrics = InMemoryMetrics()
 
-    # TTLCache function
-    @TTLCache.cached("user:{id}", ttl=60, metrics=metrics)
+    # TTL cache function
+    @cache(60, key="user:{id}", metrics=metrics)
     def get_user(id: int):
         return {"id": id, "type": "user"}
 
-    # SWRCache function
-    @SWRCache.cached("product:{id}", ttl=10, stale_ttl=60, metrics=metrics)
+    # SWR cache function
+    @cache(10, stale=60, key="product:{id}", metrics=metrics)
     def get_product(id: int):
         return {"id": id, "type": "product"}
 
-    # BGCache function
+    # Background cache function
     bg_call_count = 0
 
-    @BGCache.register_loader(
-        "shared_bg_data",
-        interval_seconds=1,
-        run_immediately=True,
-        metrics=metrics,
-    )
+    @bg(1, key="shared_bg_data", run_immediately=True, metrics=metrics)
     def bg_loader():
         nonlocal bg_call_count
         bg_call_count += 1
@@ -904,13 +883,13 @@ def test_shared_metrics_all_decorators():
 
     try:
         # Generate traffic for all three types
-        get_user(1)  # TTLCache miss
-        get_user(1)  # TTLCache hit
+        get_user(1)  # cache miss
+        get_user(1)  # cache hit
 
-        get_product(100)  # SWRCache miss
-        get_product(100)  # SWRCache hit
+        get_product(100)  # SWR miss
+        get_product(100)  # SWR hit
 
-        # Wait for BGCache initial load
+        # Wait for bg initial load
         time.sleep(0.1)
         bg_data = bg_loader()  # BGCache call
         assert bg_data is not None
@@ -947,9 +926,9 @@ def test_shared_metrics_all_decorators():
         assert total_bg_refreshes >= 1
 
         print(f"\n✓ All three decorator types tracked in single collector:")
-        print(f"  - get_user (TTLCache): {stats['caches']['get_user']}")
-        print(f"  - get_product (SWRCache): {stats['caches']['get_product']}")
-        print(f"  - shared_bg_data (BGCache): {stats['caches']['shared_bg_data']}")
+        print(f"  - get_user (cache): {stats['caches']['get_user']}")
+        print(f"  - get_product (SWR cache): {stats['caches']['get_product']}")
+        print(f"  - shared_bg_data (bg cache): {stats['caches']['shared_bg_data']}")
         print(f"  - Background refreshes: {total_bg_refreshes}")
 
     finally:

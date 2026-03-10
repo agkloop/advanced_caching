@@ -4,523 +4,549 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Production-ready caching library** for Python with TTL, stale-while-revalidate (SWR), and background refresh.  
-Type-safe, fast, thread-safe, async-friendly, and framework-agnostic.
+A production-ready Python caching library built around two symbols: `cache` and `bg`.
 
-> Issues & feature requests: [new issue](https://github.com/agkloop/advanced_caching/issues/new)
+It supports **TTL**, **Stale-While-Revalidate**, and **Background Refresh** — all in a single decorator that works transparently with both `def` and `async def`. Backends are pluggable (InMemory, Redis, S3, GCS, LocalFile, ChainCache), serialization is swappable (orjson, msgpack, pickle, protobuf, or custom), and metrics can be exported to Prometheus, OpenTelemetry, or GCP Cloud Monitoring. The hot path is lock-free and hits **~6–10 M ops/s** with zero external dependencies on the default config.
 
----
-
-## Table of Contents
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Metrics & Monitoring](#metrics--monitoring)
-- [Key Templates](#key-templates)
-- [Storage Backends](#storage-backends)
-  - [InMemCache](#inmemcache)
-  - [RedisCache & Serializers](#rediscache--serializers)
-  - [HybridCache (L1 + L2)](#hybridcache-l1--l2)
-  - [ChainCache (multi-level)](#chaincache-multi-level)
-  - [Custom Storage](#custom-storage)
-- [API Reference](#api-reference)
-- [Testing & Benchmarks](#testing--benchmarks)
-- [Use Cases](#use-cases)
-- [Comparison](#comparison)
-- [Contributing](#contributing)
-- [License](#license)
-- [BGCache (Background)](#bgcache-background)
-  - [Production example](docs/bgcache.md)
+```
+pip install advanced-caching
+```
 
 ---
 
-## Installation
+## Contents
+
+1. [Install](#install)
+2. [The Two Symbols](#the-two-symbols)
+3. [@cache — TTL & SWR](#cache--ttl--stale-while-revalidate)
+4. [@bg — Background Refresh](#bg--background-refresh)
+5. [bg.write / bg.read — Multi-Process](#bgwrite--bgread--multi-process)
+6. [Storage Backends](#storage-backends)
+7. [Serializers](#serializers)
+8. [Metrics](#metrics)
+9. [Performance](#performance)
+10. [Testing](#testing)
+
+---
+
+## Install
 
 ```bash
-uv pip install advanced-caching            # core (includes InMemoryMetrics)
-uv pip install "advanced-caching[redis]"  # Redis support
-uv pip install "advanced-caching[opentelemetry]"  # OpenTelemetry metrics
-uv pip install "advanced-caching[gcp-monitoring]"  # GCP Cloud Monitoring
-uv pip install "advanced-caching[all-metrics]"  # All metrics exporters
-# pip works too
-````
-
----
-
-## Quick Start
-
-```python
-from advanced_caching import TTLCache, SWRCache, BGCache
-
-# Sync function
-@TTLCache.cached("user:{}", ttl=300)
-def get_user(user_id: int) -> dict:
-    return db.fetch(user_id)
-
-# Async function (works natively)
-@TTLCache.cached("user:{}", ttl=300)
-async def get_user_async(user_id: int) -> dict:
-    return await db.fetch(user_id)
-
-# Stale-While-Revalidate (Sync)
-@SWRCache.cached("product:{}", ttl=60, stale_ttl=30)
-def get_product(product_id: int) -> dict:
-    return api.fetch_product(product_id)
-
-# Stale-While-Revalidate (Async)
-@SWRCache.cached("async:product:{}", ttl=60, stale_ttl=30)
-async def get_product_async(product_id: int) -> dict:
-    return await api.fetch_product(product_id)
-
-# Background refresh (Sync)
-@BGCache.register_loader("inventory", interval_seconds=300)
-def load_inventory() -> list[dict]:
-    return warehouse_api.get_all_items()
-
-# Background refresh (Async)
-@BGCache.register_loader("inventory_async", interval_seconds=300)
-async def load_inventory_async() -> list[dict]:
-    return await warehouse_api.get_all_items()
-
-# Configured Cache (Reusable Backend)
-# Create a decorator pre-wired with a specific cache (e.g., Redis)
-RedisTTL = TTLCache.configure(cache=RedisCache(redis_client))
-
-@RedisTTL.cached("user:{}", ttl=300)
-async def get_user_redis(user_id: int):
-    return await db.fetch(user_id)
+pip install advanced-caching                   # core — InMemCache, orjson
+pip install "advanced-caching[redis]"         # RedisCache
+pip install "advanced-caching[msgpack]"       # msgpack serializer
+pip install "advanced-caching[s3]"            # S3Cache
+pip install "advanced-caching[gcs]"           # GCSCache
 ```
 
 ---
 
-## Metrics & Monitoring
-
-**Optional, high-performance metrics** with <1% overhead for production monitoring.
+## The Two Symbols
 
 ```python
-from advanced_caching import TTLCache
-from advanced_caching.metrics import InMemoryMetrics
+from advanced_caching import cache, bg
+```
 
-# Create metrics collector (no external dependencies!)
+Everything the library does is exposed through these two names:
+
+| Symbol | Pattern | Works with |
+|--------|---------|-----------|
+| `@cache(ttl, key=…)` | TTL — expire after N seconds | `def` and `async def` |
+| `@cache(ttl, stale=N, key=…)` | Stale-While-Revalidate | `def` and `async def` |
+| `@bg(interval, key=…)` | Background refresh on a schedule | `def` and `async def` |
+| `@bg.write(interval, key=…)` | Write half of multi-process split | `def` and `async def` |
+| `bg.read(key, interval=…)` | Read half — local mirror, never blocks | returns a callable |
+
+---
+
+## `@cache` — TTL & Stale-While-Revalidate
+
+### Signature
+
+```python
+cache(
+    ttl: int | float,
+    *,
+    key: str | Callable,       # "user:{user_id}", "item:{}", or a callable
+    stale: int | float = 0,    # > 0 enables Stale-While-Revalidate
+    store: ... = None,         # None → fresh InMemCache() per function
+    metrics: ... = None,
+)
+```
+
+### TTL cache
+
+Cache the result for `ttl` seconds. Works with sync and async functions identically.
+
+```python
+from advanced_caching import cache
+
+@cache(60, key="user:{user_id}")
+async def get_user(user_id: int) -> dict:
+    return await db.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
+
+@cache(300, key="config:{env}")
+def load_config(env: str) -> dict:
+    return read_yaml(f"config/{env}.yaml")
+
+user = await get_user(42)   # miss → calls DB
+user = await get_user(42)   # hit  → instant, no DB
+```
+
+### Stale-While-Revalidate (SWR)
+
+Set `stale > 0` to add a second window after the TTL expires. During this window the stale value is returned immediately while a background refresh runs — eliminating the latency spike that happens on a hard expiry.
+
+```
+t=0 ──────────── t=ttl ─────────── t=ttl+stale ──── dead
+   [ fresh: hit ]   [ stale: instant + bg refresh ]  [ miss ]
+```
+
+```python
+@cache(60, stale=30, key="price:{symbol}")
+async def get_price(symbol: str) -> float:
+    return await exchange_api.fetch(symbol)
+
+# t < 60s  → fresh hit, no network call
+# 60s–90s  → returns last known price immediately, triggers bg refresh
+# t > 90s  → entry dead, blocks caller until refresh completes
+```
+
+### Key templates
+
+```python
+# Static — fastest (~16M ops/s key resolution)
+@cache(60, key="feature_flags")
+async def load_flags() -> dict: ...
+
+# Positional {} — maps to the first argument
+@cache(60, key="user:{}")
+async def get_user(user_id: int) -> dict: ...
+
+# Named — resolved by parameter name
+@cache(60, key="order:{user_id}:{order_id}")
+async def get_order(user_id: int, order_id: int) -> dict: ...
+
+# Callable — full control
+@cache(60, key=lambda uid, role: f"user:{role}:{uid}")
+async def get_user_by_role(uid: int, role: str) -> dict: ...
+```
+
+### Invalidation
+
+```python
+# Delete a specific entry (same signature as the decorated function)
+await get_user.invalidate(42)      # removes "user:42"
+load_config.invalidate("prod")     # removes "config:prod"
+
+# Wipe everything in the store
+get_user.clear()
+```
+
+### Custom store
+
+```python
+import redis
+from advanced_caching import cache, RedisCache, ChainCache, InMemCache
+
+r = redis.from_url("redis://localhost:6379", decode_responses=False)
+redis_store = RedisCache(r, prefix="myapp:")
+
+# Single Redis store
+@cache(3600, key="catalog:{page}", store=redis_store)
+async def get_catalog(page: int) -> list: ...
+
+# Two-tier: L1 InMem (60s) + L2 Redis (1h)
+tiered = ChainCache.build(InMemCache(), redis_store, ttls=[60, 3600])
+
+@cache(3600, key="catalog:{page}", store=tiered)
+async def get_catalog_tiered(page: int) -> list: ...
+```
+
+---
+
+## `@bg` — Background Refresh
+
+`@bg` runs the function on a fixed schedule (APScheduler) and stores the result. Every call is a cache read — the function never blocks the caller. Latency is always sub-microsecond.
+
+### Signature
+
+```python
+bg(
+    interval: int | float,     # seconds between refreshes
+    *,
+    key: str,                  # no template placeholders — bg is zero-argument
+    ttl: int | float | None = None,   # default: interval * 2
+    store: ... = None,
+    metrics: ... = None,
+    on_error: Callable[[Exception], None] | None = None,
+    run_immediately: bool = True,     # populate cache before first request
+)
+```
+
+### Usage
+
+```python
+from advanced_caching import bg
+
+# Async function — uses asyncio scheduler
+@bg(300, key="feature_flags")
+async def load_flags() -> dict:
+    return await remote_config.fetch()
+
+# Sync function — uses background thread scheduler
+@bg(60, key="db_stats")
+def collect_stats() -> dict:
+    return db.execute("SELECT count(*) FROM users").fetchone()
+
+# Call exactly like a normal function — always instant
+flags = await load_flags()
+stats = collect_stats()
+```
+
+### Error handling
+
+```python
+import logging
+
+@bg(60, key="rates", on_error=lambda e: logging.warning("refresh failed: %s", e))
+async def refresh_rates() -> dict:
+    return await forex_api.fetch()
+# On error: stale value is kept, on_error is called, scheduler keeps running
+```
+
+### Shutdown
+
+```python
+import atexit
+atexit.register(bg.shutdown)
+
+# FastAPI lifespan:
+from contextlib import asynccontextmanager
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    bg.shutdown()
+```
+
+---
+
+## `bg.write` / `bg.read` — Multi-Process
+
+For multi-process deployments (e.g. gunicorn workers), one process writes to a shared store (Redis) and every reader process keeps a private in-memory copy synced on a schedule. Reader calls are always local — they never touch Redis in the request path.
+
+```mermaid
+flowchart LR
+    subgraph Worker
+        W["@bg.write(60, key='rates', store=redis)"] -->|every 60s| FN[refresh fn]
+        FN --> RD[(Redis)]
+    end
+    subgraph "Web Process × N"
+        BR["bg.read('rates', interval=30, store=redis)"] -->|every 30s| RD
+        BR --> L[(Local\nInMemCache)]
+        L -->|sub-μs| REQ[Request handler]
+    end
+```
+
+### `bg.write`
+
+```python
+bg.write(
+    interval: int | float,
+    *,
+    key: str,
+    ttl: int | float | None = None,
+    store: CacheStorage | None = None,    # shared backend, e.g. RedisCache
+    metrics: MetricsCollector | None = None,
+    on_error: Callable | None = None,
+    run_immediately: bool = True,
+)
+```
+
+- **One writer per key per process** — raises `ValueError` on duplicate registration.
+- Tracks `background_refresh` success/failure in `metrics=`.
+
+```python
+import redis
+from advanced_caching import bg, RedisCache, InMemoryMetrics
+
+r = redis.from_url(REDIS_URL, decode_responses=False)
+shared = RedisCache(r, prefix="shared:")
 metrics = InMemoryMetrics()
 
-# Use with any decorator
-@TTLCache.cached("user:{id}", ttl=60, metrics=metrics)
-def get_user(id: int):
-    return {"id": id, "name": "Alice"}
-
-# Query metrics via API
-stats = metrics.get_stats()
-# Returns: hit_rate, latency percentiles (p50/p95/p99),
-# errors, memory usage, background refresh stats
+@bg.write(60, key="exchange_rates", store=shared, metrics=metrics)
+async def refresh_rates() -> dict:
+    return await forex_api.fetch_all()
 ```
 
-**Built-in collectors:**
-- **InMemoryMetrics**: Zero dependencies, perfect for API queries
-- **NullMetrics**: Zero overhead when metrics disabled (default)
+### `bg.read`
 
-**Exporters (optional):**
-- **OpenTelemetry**: OTLP, Jaeger, Zipkin, Prometheus
-- **GCP Cloud Monitoring**: Google Cloud Platform
+```python
+bg.read(
+    key: str,
+    *,
+    interval: int | float = 0,
+    ttl: int | float | None = None,
+    store: CacheStorage | None = None,    # None → auto-discover writer's store (same process)
+    metrics: MetricsCollector | None = None,
+    on_error: Callable | None = None,
+    run_immediately: bool = True,
+) -> Callable[[], Any]
+```
 
-**Custom exporters:** See [Custom Exporters Guide](docs/custom-metrics-exporters.md) for Prometheus, StatsD, and Datadog implementations.
+- Returns a **callable** — call it to get the current value from the local mirror.
+- Each `bg.read()` call creates its own **independent** private local cache.
+- `store=None` within the same process → auto-discovers the writer's store.
 
-📖 **[Full Metrics Documentation](docs/metrics.md)**
+```python
+# Different process from writer — must pass store explicitly:
+get_rates = bg.read("exchange_rates", interval=30, store=shared)
+rates = get_rates()   # local dict lookup, never blocks on Redis
 
----
-
-## Key Templates
-
-The library supports smart key generation that handles both positional and keyword arguments seamlessly.
-
-* **Positional Placeholder**: `"user:{}"`
-  * Uses the first argument, whether passed positionally or as a keyword.
-  * Example: `get_user(123)` or `get_user(user_id=123)` -> `"user:123"`
-
-* **Named Placeholder**: `"user:{user_id}"`
-  * Resolves `user_id` from keyword arguments OR positional arguments (by inspecting the function signature).
-  * Example: `def get_user(user_id): ...` called as `get_user(123)` -> `"user:123"`
-
-* **Custom Function**:
-  * For complex logic, pass a callable.
-  * Example1 for kw/args with default values use : `key=lambda *a, **k: f"user:{k.get('user_id', a[0])}"`
-  * Example2 fns with no defaults use : `key=lambda user_id: f"user:{user_id}"`
+# Same process as writer — store auto-discovered:
+get_rates = bg.read("exchange_rates")
+```
 
 ---
 
 ## Storage Backends
 
-- InMemCache (default): Fast, process-local
-- RedisCache: Distributed in-memory
-- HybridCache: L1 (memory) + L2 (Redis)
-- ChainCache: Arbitrary multi-level chain (e.g., InMem -> Redis -> S3/GCS)
-- S3Cache: Object storage backend (AWS)
-- GCSCache: Object storage backend (Google Cloud)
-- LocalFileCache: Filesystem-backed cache (per-host)
+| Backend | Best for | Install |
+|---------|---------|---------|
+| `InMemCache` | Single-process apps, highest throughput | built-in |
+| `RedisCache` | Distributed / multi-process | `[redis]` |
+| `ChainCache` | N-level read-through (L1 + L2 + …) | built-in |
+| `HybridCache` | L1 in-memory + L2 Redis, convenience wrapper | `[redis]` |
+| `LocalFileCache` | Per-host disk persistence | built-in |
+| `S3Cache` | Large objects, cheap durable storage | `[s3]` |
+| `GCSCache` | Large objects on Google Cloud | `[gcs]` |
 
-### InMemCache
+### `InMemCache`
 
-Thread-safe in-memory cache with TTL.
+Thread-safe. Lock-free hot path (GIL guarantees `dict.get` atomicity).
 
 ```python
 from advanced_caching import InMemCache
-
-cache = InMemCache()
-cache.set("key", "value", ttl=60)
-cache.get("key")
-cache.delete("key")
-cache.exists("key")
-cache.set_if_not_exists("key", "value", ttl=60)
-cache.cleanup_expired()
+store = InMemCache()
 ```
 
----
-
-### RedisCache & Serializers
+### `RedisCache`
 
 ```python
 import redis
-from advanced_caching import RedisCache, JsonSerializer
+from advanced_caching import RedisCache, serializers
 
-client = redis.Redis(host="localhost", port=6379)
+r = redis.from_url("redis://localhost:6379", decode_responses=False)
 
-cache = RedisCache(client, prefix="app:")
-json_cache = RedisCache(client, prefix="app:json:", serializer="json")
-custom_json = RedisCache(client, prefix="app:json2:", serializer=JsonSerializer())
+store = RedisCache(r, prefix="app:", serializer=serializers.msgpack)
 ```
 
----
-
-### HybridCache (L1 + L2)
-
-Two-level cache:
-
-* **L1**: In-memory
-* **L2**: Redis
-
-#### Simple setup
+Connection pooling:
 
 ```python
-import redis
-from advanced_caching import HybridCache, TTLCache
-
-client = redis.Redis()
-hybrid = HybridCache.from_redis(client, prefix="app:", l1_ttl=60)
-
-@TTLCache.cached("user:{}", ttl=300, cache=hybrid)
-def get_user(user_id: int):
-    return {"id": user_id}
+pool = redis.ConnectionPool.from_url("redis://localhost", max_connections=20)
+r = redis.Redis(connection_pool=pool, decode_responses=False)
 ```
 
-#### Manual wiring
+### `ChainCache` — multi-level read-through
+
+On a miss at L1, reads from L2 and backfills L1. On a hit at L1, never touches L2.
 
 ```python
-from advanced_caching import HybridCache, InMemCache, RedisCache
+from advanced_caching import ChainCache, InMemCache, RedisCache
 
-l1 = InMemCache()
-l2 = RedisCache(client, prefix="app:")
-# l2_ttl defaults to l1_ttl * 2 if not specified
-hybrid = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60)
-
-# Explicit l2_ttl for longer L2 persistence
-hybrid_long_l2 = HybridCache(l1_cache=l1, l2_cache=l2, l1_ttl=60, l2_ttl=3600)
-```
-
-**TTL behavior:**
-- `l1_ttl`: How long data stays in fast L1 memory cache
-- `l2_ttl`: How long data persists in L2 (Redis). Defaults to `l1_ttl * 2`
-- When data expires from L1 but exists in L2, it's automatically repopulated to L1
-
-#### With BGCache using lambda factory
-
-For lazy initialization (e.g., deferred Redis connection):
-
-```python
-from advanced_caching import BGCache, HybridCache, InMemCache, RedisCache
-
-def get_redis_cache():
-    """Lazy Redis connection factory."""
-    import redis
-    client = redis.Redis(host="localhost", port=6379)
-    return RedisCache(client, prefix="app:")
-
-@BGCache.register_loader(
-    "config_map",
-    interval_seconds=3600,
-    run_immediately=True,
-    cache=lambda: HybridCache(
-        l1_cache=InMemCache(),
-        l2_cache=get_redis_cache(),
-        l1_ttl=3600,
-        l2_ttl=86400  # L2 persists longer than L1
-    )
-)
-def load_config_map() -> dict[str, dict]:
-    return {"db": {"host": "localhost"}, "cache": {"ttl": 300}}
-
-# Access nested data
-db_host = load_config_map().get("db", {}).get("host")
-```
-
----
-
-### ChainCache (multi-level)
-
-```python
-from advanced_caching import InMemCache, RedisCache, S3Cache, ChainCache
-
-chain = ChainCache([
-    (InMemCache(), 60),                    # L1 fast
-    (RedisCache(redis_client), 300),       # L2 distributed
-    (S3Cache(bucket="my-cache"), 3600),   # L3 durable
-])
-
-# Write-through all levels (per-level TTL caps applied)
-chain.set("user:123", {"name": "Ana"}, ttl=900)
-
-# Read-through with promotion to faster levels
-user = chain.get("user:123")
-```
-
-Notes:
-- Provide per-level TTL caps in the tuple; if `None`, the passed `ttl` is used.
-- `set_if_not_exists` delegates atomicity to the deepest level and backfills upper levels on success.
-- `get`/`get_entry` promote hits upward for hotter reads.
-
----
-
-### Object Storage Backends (S3/GCS)
-
-Store large cached objects cheaply in AWS S3 or Google Cloud Storage.
-Supports compression and metadata-based TTL checks to minimize costs.
-
-**[📚 Full Documentation & Best Practices](docs/object-storage-caching.md)**
-
-```python
-from advanced_caching import S3Cache, GCSCache
-
-user_cache = S3Cache(
-    bucket="my-cache-bucket",
-    prefix="users/",
-    serializer="json",
-    compress=True,
-    dedupe_writes=True,  # optional: skip uploads when content unchanged (adds HEAD)
+tiered = ChainCache.build(
+    InMemCache(),
+    RedisCache(r, prefix="v1:"),
+    ttls=[60, 3600],          # L1 TTL=60s, L2 TTL=1h
 )
 
-gcs_cache = GCSCache(
-    bucket="my-cache-bucket",
-    prefix="users/",
-    serializer="json",
-    compress=True,
-    dedupe_writes=True,  # optional: skip uploads when content unchanged (adds metadata check)
-)
+# Three tiers:
+three_tier = ChainCache.build(l1, l2, l3, ttls=[60, 3600, 86400])
 ```
 
-### RedisCache dedupe_writes
-
-`RedisCache(..., dedupe_writes=True)` compares the serialized payload to the stored value; if unchanged, it skips rewriting and only refreshes TTL when provided.
-
-### LocalFileCache (filesystem)
+### `LocalFileCache`
 
 ```python
-from advanced_caching import LocalFileCache
-
-cache = LocalFileCache("/var/tmp/ac-cache", dedupe_writes=True)
-cache.set("user:123", {"name": "Ana"}, ttl=300)
-user = cache.get("user:123")
+from advanced_caching import LocalFileCache, serializers
+store = LocalFileCache("/var/cache/myapp", serializer=serializers.json)
 ```
 
-Notes: one file per key; atomic writes; optional compression and dedupe to skip rewriting identical content.
+### `S3Cache` / `GCSCache`
+
+```python
+from advanced_caching import S3Cache, GCSCache, serializers
+
+s3  = S3Cache(bucket="myapp-cache", prefix="v1/", serializer=serializers.msgpack)
+gcs = GCSCache(bucket="myapp-cache", prefix="v1/", serializer=serializers.json)
+```
 
 ---
 
-### Custom Storage
+## Serializers
 
-Implement your own storage backend by following the `CacheStorage` protocol:
+Serializers are only relevant for backends that write bytes externally: `RedisCache`, `LocalFileCache`, `S3Cache`, `GCSCache`. `InMemCache` stores Python objects directly — no serialization overhead.
+
+| Serializer | Symbol | Best for |
+|-----------|--------|---------|
+| orjson (default) | `serializers.json` | JSON-safe dicts / lists |
+| pickle | `serializers.pickle` | Any Python object, no schema |
+| msgpack | `serializers.msgpack` | Compact binary, large payloads |
+| protobuf | `serializers.protobuf(MyClass)` | Cross-language, enforced schema |
+| custom | any object with `.dumps`/`.loads` | Anything |
 
 ```python
-from advanced_caching import CacheStorage, CacheEntry
-from typing import Any
+from advanced_caching import serializers, RedisCache
 
-class MyCustomStorage:
-    """Custom cache storage implementation."""
-    
-    def get(self, key: str) -> Any | None:
-        """Retrieve value by key, or None if not found/expired."""
-        ...
-    
-    def get_entry(self, key: str) -> CacheEntry | None:
-        """Retrieve full cache entry with metadata."""
-        ...
-    
-    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
-        """Store value with optional TTL in seconds."""
-        ...
-    
-    def set_if_not_exists(self, key: str, value: Any, ttl: int | None = None) -> bool:
-        """Atomic set-if-not-exists. Returns True if set, False if key exists."""
-        ...
-    
-    def delete(self, key: str) -> None:
-        """Remove key from storage."""
-        ...
-    
-    def exists(self, key: str) -> bool:
-        """Check if key exists and is not expired."""
-        ...
+RedisCache(r, serializer=serializers.json)
+RedisCache(r, serializer=serializers.pickle)
+RedisCache(r, serializer=serializers.msgpack)
+RedisCache(r, serializer=serializers.protobuf(MyProto))
 
-# Validate implementation
-from advanced_caching import validate_cache_storage
-validate_cache_storage(MyCustomStorage())
+# Custom:
+class MySerializer:
+    def dumps(self, v: object) -> bytes: ...
+    def loads(self, b: bytes) -> object: ...
 
-# Use with decorators
-@TTLCache.cached("user:{id}", ttl=60, cache=MyCustomStorage())
-def get_user(id: int):
-    return {"id": id}
+RedisCache(r, serializer=MySerializer())
 ```
 
-**Exposing Metrics:**
+---
 
-To track cache operations in your custom storage, wrap it with `InstrumentedStorage`:
+## Metrics
+
+### `InMemoryMetrics` — built-in collector
 
 ```python
-from advanced_caching.storage import InstrumentedStorage
-from advanced_caching.metrics import InMemoryMetrics
+from advanced_caching import InMemoryMetrics
 
-# Create metrics collector
 metrics = InMemoryMetrics()
 
-# Wrap your custom storage
-instrumented = InstrumentedStorage(
-    storage=MyCustomStorage(),
-    metrics=metrics,
-    cache_name="my_custom_cache"
-)
+@cache(60, key="user:{uid}", metrics=metrics)
+async def get_user(uid: int) -> dict: ...
 
-# Use instrumented storage
-@TTLCache.cached("user:{id}", ttl=60, cache=instrumented)
-def get_user(id: int):
-    return {"id": id}
+@bg(300, key="flags", metrics=metrics)
+async def load_flags() -> dict: ...
 
-# Query metrics
 stats = metrics.get_stats()
-# Includes: hits, misses, latency, errors, memory usage for "my_custom_cache"
+# {
+#   "caches": {
+#     "get_user": {
+#       "hits": 120, "misses": 5, "hit_rate_percent": 96.0,
+#       "latency_p50_ms": 0.08, "latency_p95_ms": 0.31,
+#       "latency_p99_ms": 0.85, "errors": 0
+#     }
+#   },
+#   "background_refresh": {
+#     "flags": {"success": 12, "failure": 0}
+#   }
+# }
 ```
 
-`InstrumentedStorage` automatically tracks:
-- All cache operations (get, set, delete)
-- Operation latency (p50/p95/p99 percentiles)
-- Errors with exception types
-- Memory usage (if your storage supports it)
-
-See [Metrics Documentation](docs/metrics.md) for details.
-
----
-
-## BGCache (Background)
-
-Single-writer/multi-reader pattern with background refresh and optional independent reader caches.
+### Exporters
 
 ```python
-from advanced_caching import BGCache, InMemCache
+# Prometheus (pip install prometheus_client)
+from advanced_caching.exporters import PrometheusMetrics
+metrics = PrometheusMetrics(namespace="myapp", subsystem="cache")
 
-# Writer: enforced single registration per key; refreshes cache on a schedule
-@BGCache.register_writer(
-    "daily_config",
-    interval_seconds=300,   # refresh every 5 minutes
-    ttl=None,               # defaults to interval*2
-    run_immediately=True,
-    cache=InMemCache(),     # or RedisCache / ChainCache
-)
-def load_config():
-    return expensive_fetch()
+# OpenTelemetry (pip install opentelemetry-api)
+from advanced_caching.exporters import OpenTelemetryMetrics
+metrics = OpenTelemetryMetrics(meter_name="myapp.cache")
 
-# Readers: read-only; keep a local cache warm by pulling from the writer's cache
-reader = BGCache.get_reader(
-    "daily_config",
-    interval_seconds=60,    # periodically pull from source cache into local cache
-    ttl=None,               # local cache TTL defaults to interval*2
-    run_immediately=True,
-    cache=InMemCache(),     # local cache for this process
-)
-
-# Usage
-cfg = reader()   # returns value from local cache; on miss pulls once from source cache
+# GCP Cloud Monitoring (pip install google-cloud-monitoring)
+from advanced_caching.exporters import GCPCloudMonitoringMetrics
+metrics = GCPCloudMonitoringMetrics(project_id="my-project")
 ```
 
-Notes:
-- `register_writer` enforces one writer per key globally; raises if duplicate.
-- `interval_seconds` <= 0 disables scheduling; wrapper still writes-on-demand on misses.
-- `run_immediately=True` triggers an initial refresh if the cache is empty.
-- `get_reader` creates a read-only accessor backed by its own cache; it pulls from the provided cache (usually the writer’s cache) and optionally keeps it warm on a schedule.
-- Use `cache=` on readers to override the local cache backend (e.g., InMemCache in each process) while sourcing data from the writer’s cache backend.
+### Custom collector
 
-See `docs/bgcache.md` for a production-grade example with Redis/ChainCache, error handling, and reader-local caches.
+```python
+class MyMetrics:
+    def record_hit(self, cache_name, key=None, metadata=None): ...
+    def record_miss(self, cache_name, key=None, metadata=None): ...
+    def record_set(self, cache_name, key=None, value_size=None, metadata=None): ...
+    def record_delete(self, cache_name, key=None, metadata=None): ...
+    def record_latency(self, cache_name, operation=None, duration_seconds=None, metadata=None): ...
+    def record_error(self, cache_name, operation=None, error_type=None, metadata=None): ...
+    def record_memory_usage(self, cache_name, bytes_used=None, entry_count=None, metadata=None): ...
+    def record_background_refresh(self, cache_name, success=None, duration_seconds=None, metadata=None): ...
+```
 
----
+### `NULL_METRICS` — zero-overhead no-op
 
-## API Reference
+```python
+from advanced_caching.metrics import NULL_METRICS
 
-* `TTLCache.cached(key, ttl, cache=None)`
-* `SWRCache.cached(key, ttl, stale_ttl=0, cache=None)`
-* `BGCache.register_loader(key, interval_seconds, ttl=None, run_immediately=True)`
-* Storages:
-
-  * `InMemCache()`
-  * `RedisCache(redis_client, prefix="", serializer="pickle"|"json"|custom)`
-  * `HybridCache(l1_cache, l2_cache, l1_ttl=60, l2_ttl=None)` - `l2_ttl` defaults to `l1_ttl * 2`
-* Utilities:
-
-  * `CacheEntry`
-  * `CacheStorage`
-  * `validate_cache_storage()`
+@cache(60, key="fast:{x}", metrics=NULL_METRICS)
+def fast_fn(x: int) -> int: ...
+```
 
 ---
 
-## Testing & Benchmarks
+## Performance
+
+Measured on Python 3.12, Apple M2, single thread, N=200,000 iterations.
+
+**Storage & decorator hot paths**
+
+| Operation | Throughput | Latency |
+|-----------|-----------|---------|
+| `InMemCache.get()` raw | **10.3 M ops/s** | 0.10 µs |
+| `@cache` sync miss (ttl=0) | **7.3 M ops/s** | 0.14 µs |
+| `bg.read()` local hit | **7.5 M ops/s** | 0.13 µs |
+| `@cache` sync hit — static key | **6.0 M ops/s** | 0.17 µs |
+| `@cache` async hit — static key | **4.9 M ops/s** | 0.20 µs |
+| `@cache` SWR stale-serve | **2.9 M ops/s** | 0.35 µs |
+| `@cache` ChainCache L1 hit | **2.9 M ops/s** | 0.35 µs |
+| `@cache` sync hit — named template key | **1.7 M ops/s** | 0.59 µs |
+| `@cache` sync hit + InMemoryMetrics | **1.6 M ops/s** | 0.63 µs |
+
+**Callable key strategies**
+
+| Key type | Throughput | Latency | Notes |
+|----------|-----------|---------|-------|
+| `key=lambda uid: f"u:{uid}"` | **3.9 M ops/s** | 0.26 µs | Fastest callable — no inspection |
+| `key=lambda t, uid: f"{t}:{uid}"` (async) | **2.7 M ops/s** | 0.37 µs | Multi-arg async |
+| `key=lambda uid: f"...{md5(uid)}"` | **1.4 M ops/s** | 0.73 µs | Hashing overhead |
+| `key="user:{user_id}"` template | **1.7 M ops/s** | 0.59 µs | Signature-bound template |
+
+**Key insights:**
+- **Static key** (`"feature_flags"`) is the fastest — no key computation at all (~6 M ops/s)
+- **Simple lambda** (`lambda uid: f"u:{uid}"`) is **2.3× faster** than a named template — it skips signature inspection entirely
+- **Hashing in the key** (`md5`, `sha256`) adds ~0.5 µs per call — use only when inputs are unbounded strings
+- **Metrics** add ~0.4 µs per call; use `NULL_METRICS` (default) on ultra-hot paths
 
 ```bash
-uv run pytest -q
 uv run python tests/benchmark.py
+BENCH_N=500000 uv run python tests/benchmark.py
 ```
 
 ---
 
-## Use Cases
+## Testing
 
-* Web & API caching (FastAPI, Flask, Django)
-* Database query caching
-* SWR for upstream APIs
-* Background refresh for configs & datasets
-* Distributed caching with Redis
-* Hybrid L1/L2 hot-path optimization
+```bash
+uv pip install -e ".[dev,redis,tests]"
 
----
+uv run pytest -q                                       # all unit tests
+uv run pytest tests/test_integration_redis.py          # Redis (requires Docker)
+uv run pytest tests/test_s3_cache_integration.py       # S3/GCS (docker-compose up)
+```
 
-## Comparison
+Runnable examples:
 
-| Feature             | advanced-caching | lru_cache | cachetools | Redis  | Memcached |
-| ------------------- | ---------------- | --------- | ---------- | ------ | --------- |
-| TTL                 | ✅                | ❌         | ✅          | ✅      | ✅         |
-| SWR                 | ✅                | ❌         | ❌          | Manual | Manual    |
-| Background refresh  | ✅                | ❌         | ❌          | Manual | Manual    |
-| Custom backends     | ✅ (InMem/Redis/S3/GCS/Chain) | ❌ | ❌ | N/A | N/A |
-| Distributed         | ✅ (Redis, ChainCache) | ❌ | ❌ | ✅ | ✅ |
-| Multi-level chain   | ✅ (ChainCache)  | ❌         | ❌          | Manual | Manual    |
-| Dedupe writes       | ✅ (Redis/S3/GCS opt-in) | ❌ | ❌ | Manual | Manual |
-| Async support       | ✅                | ❌         | ❌          | ✅      | ✅         |
-| Type hints          | ✅                | ✅         | ✅          | ❌      | ❌         |
+```bash
+uv run python examples/quickstart.py
+uv run python examples/writer_reader.py
+uv run python examples/serializers_example.py
+uv run python examples/metrics_and_exporters.py
+```
 
----
-
-## Contributing
-
-1. Fork the repo
-2. Create a feature branch
-3. Add tests
-4. Run `uv run pytest`
-5. Open a pull request
+📖 Full API reference, production patterns, and configuration: **[docs/guide.md](docs/guide.md)**
 
 ---
 
 ## License
-MIT License – see [LICENSE](LICENSE).
+
+MIT — see [LICENSE](LICENSE).

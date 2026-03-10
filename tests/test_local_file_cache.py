@@ -2,42 +2,39 @@ import os
 import time
 import tempfile
 
-from advanced_caching import LocalFileCache
+from advanced_caching import LocalFileCache, cache, ChainCache, InMemCache
 
 
 def test_local_file_cache_set_get_and_expiry():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache = LocalFileCache(tmpdir)
-        cache.set("foo", "bar", ttl=0.1)
-        assert cache.get("foo") == "bar"
+        c = LocalFileCache(tmpdir)
+        c.set("foo", "bar", ttl=0.1)
+        assert c.get("foo") == "bar"
         time.sleep(0.2)
-        assert cache.get("foo") is None
+        assert c.get("foo") is None
 
 
 def test_local_file_cache_dedupe_writes():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache = LocalFileCache(tmpdir, dedupe_writes=True)
-        cache.set("foo", {"a": 1}, ttl=0)
+        c = LocalFileCache(tmpdir, dedupe_writes=True)
+        c.set("foo", {"a": 1}, ttl=0)
         mtime1 = os.path.getmtime(os.path.join(tmpdir, "foo"))
         time.sleep(0.05)
-        cache.set("foo", {"a": 1}, ttl=0)
+        c.set("foo", {"a": 1}, ttl=0)
         mtime2 = os.path.getmtime(os.path.join(tmpdir, "foo"))
-        # Allow filesystem timestamp granularity drift; ensure dedupe prevented meaningful rewrite
-        assert cache.get("foo") == {"a": 1}
+        assert c.get("foo") == {"a": 1}
         assert mtime2 <= mtime1 + 0.1
-        cache.set("foo", {"a": 2}, ttl=0)
+        c.set("foo", {"a": 2}, ttl=0)
         mtime3 = os.path.getmtime(os.path.join(tmpdir, "foo"))
         assert mtime3 > mtime2
 
 
 def test_ttlcache_with_local_file_cache_decorator():
-    from advanced_caching import TTLCache
-
     calls = {"n": 0}
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache = LocalFileCache(tmpdir)
+        file_store = LocalFileCache(tmpdir)
 
-        @TTLCache.cached("demo", ttl=0.2, cache=cache)
+        @cache(0.2, key="demo", store=file_store)
         def compute():
             calls["n"] += 1
             return calls["n"]
@@ -51,20 +48,17 @@ def test_ttlcache_with_local_file_cache_decorator():
 
 
 def test_chaincache_with_local_file_and_ttlcache():
-    from advanced_caching import ChainCache, InMemCache, TTLCache
-
     calls = {"n": 0}
     with tempfile.TemporaryDirectory() as tmpdir:
         l1 = InMemCache()
         l2 = LocalFileCache(tmpdir)
         chain = ChainCache([(l1, 0), (l2, None)])
 
-        @TTLCache.cached("chain:{user_id}", ttl=0.2, cache=chain)
+        @cache(0.2, key="chain:{user_id}", store=chain)
         def fetch_user(user_id: int):
             calls["n"] += 1
             return {"id": user_id, "v": calls["n"]}
 
-        # First call populates chain (both L1 and file)
         u1 = fetch_user(1)
         assert u1 == {"id": 1, "v": 1}
 
@@ -72,13 +66,14 @@ def test_chaincache_with_local_file_and_ttlcache():
         u2 = fetch_user(1)
         assert u2 == u1
 
-        # Clear L1 by recreating chain with fresh InMem but same file backend
+        # Clear L1, rebuild chain — file backend still has the value
         l1b = InMemCache()
         chain2 = ChainCache([(l1b, 0), (l2, None)])
 
-        @TTLCache.cached("chain:{user_id}", ttl=0.2, cache=chain2)
+        @cache(0.2, key="chain:{user_id}", store=chain2)
         def fetch_user_again(user_id: int):
-            return fetch_user(user_id)  # will hit file backend via chain2
+            calls["n"] += 1
+            return {"id": user_id, "v": calls["n"]}
 
         u3 = fetch_user_again(1)
-        assert u3 == u1  # pulled from LocalFileCache via chain
+        assert u3 == u1  # pulled from LocalFileCache via chain2

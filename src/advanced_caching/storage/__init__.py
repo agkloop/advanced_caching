@@ -1,10 +1,6 @@
 from .utils import (
     CacheEntry,
     CacheStorage,
-    JsonSerializer,
-    PickleSerializer,
-    _BUILTIN_SERIALIZERS,
-    _hash_bytes,
     validate_cache_storage,
     InstrumentedStorage,
 )
@@ -19,10 +15,6 @@ from .gcs_cache import GCSCache
 __all__ = [
     "CacheEntry",
     "CacheStorage",
-    "JsonSerializer",
-    "PickleSerializer",
-    "_BUILTIN_SERIALIZERS",
-    "_hash_bytes",
     "validate_cache_storage",
     "InstrumentedStorage",
     "InMemCache",

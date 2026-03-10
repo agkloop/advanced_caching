@@ -4,10 +4,12 @@ import pytest
 
 try:
     from google.cloud import storage
+    import requests as _requests
 except ImportError:  # pragma: no cover
     storage = None
+    _requests = None  # type: ignore
 
-from advanced_caching import GCSCache, TTLCache, SWRCache, ChainCache, InMemCache
+from advanced_caching import cache, GCSCache, ChainCache, InMemCache
 
 EMULATOR = os.getenv("STORAGE_EMULATOR_HOST") or "http://localhost:4443"
 USE_EMULATOR = bool(EMULATOR)
@@ -15,6 +17,22 @@ USE_EMULATOR = bool(EMULATOR)
 pytestmark = pytest.mark.skipif(
     storage is None, reason="google-cloud-storage not installed"
 )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def require_gcs_emulator():
+    if USE_EMULATOR and not _emulator_available():
+        pytest.skip(f"GCS emulator not reachable at {EMULATOR}")
+
+
+def _emulator_available() -> bool:
+    if _requests is None:
+        return False
+    try:
+        _requests.get(EMULATOR, timeout=2)
+        return True
+    except Exception:
+        return False
 
 
 def _client():
@@ -37,19 +55,19 @@ def test_gcscache_set_get_and_dedupe():
     except Exception:
         pass
 
-    cache = GCSCache(
+    store = GCSCache(
         bucket="test-bkt",
         prefix="t/",
         client=client,
         serializer="json",
         dedupe_writes=True,
     )
-    cache.set("k1", {"v": 1}, ttl=0)
-    assert cache.get("k1") == {"v": 1}
+    store.set("k1", {"v": 1}, ttl=0)
+    assert store.get("k1") == {"v": 1}
 
-    cache.set("k1", {"v": 1}, ttl=0)  # dedupe should skip rewrite
-    cache.set("k1", {"v": 2}, ttl=0)
-    assert cache.get("k1") == {"v": 2}
+    store.set("k1", {"v": 1}, ttl=0)  # dedupe should skip rewrite
+    store.set("k1", {"v": 2}, ttl=0)
+    assert store.get("k1") == {"v": 2}
 
 
 @pytest.mark.integration
@@ -63,7 +81,7 @@ def test_ttlcache_with_gcscache_decorator():
     except Exception:
         pass
 
-    cache = GCSCache(
+    store = GCSCache(
         bucket="test-bkt2",
         prefix="u/",
         client=client,
@@ -74,7 +92,7 @@ def test_ttlcache_with_gcscache_decorator():
 
     calls = {"n": 0}
 
-    @TTLCache.cached("user:{user_id}", ttl=0.2, cache=cache)
+    @cache(0.2, key="user:{user_id}", store=store)
     def fetch_user(user_id: int):
         calls["n"] += 1
         return {"id": user_id, "n": calls["n"]}
@@ -85,7 +103,7 @@ def test_ttlcache_with_gcscache_decorator():
 
     time.sleep(1.0)
     # Force delete to ensure cache miss if TTL/time drift is an issue
-    cache.delete("user:1")
+    store.delete("user:1")
     third = fetch_user(1)
     # TTL expired, should recompute
     assert third["n"] >= 2
@@ -100,13 +118,13 @@ def test_swrcache_with_gcscache_decorator():
         client.create_bucket(bucket)
     except Exception:
         pass
-    cache = GCSCache(
+    store = GCSCache(
         bucket="test-bkt-swr", prefix="swr/", client=client, serializer="json"
     )
 
     calls = {"n": 0}
 
-    @SWRCache.cached("data:{id}", ttl=0.5, stale_ttl=1.0, cache=cache)
+    @cache(0.5, stale=1.0, key="data:{id}", store=store)
     def fetch_data(id: int):
         calls["n"] += 1
         return {"id": id, "n": calls["n"]}
@@ -119,7 +137,7 @@ def test_swrcache_with_gcscache_decorator():
     v2 = fetch_data(1)
     assert v2["n"] == 1
 
-    # 3. Wait for TTL to expire but within stale_ttl
+    # 3. Wait for TTL to expire but within stale window
     time.sleep(0.6)
     # Should return stale value immediately, trigger background refresh
     v3 = fetch_data(1)

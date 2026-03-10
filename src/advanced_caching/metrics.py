@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Protocol
 
 
@@ -345,8 +345,8 @@ class InMemoryMetrics:
         self._deletes: dict[str, int] = defaultdict(int)
         self._errors: dict[tuple[str, str, str], int] = defaultdict(int)
 
-        # Store recent latencies for percentile calculation
-        self._latencies: dict[tuple[str, str], list[float]] = defaultdict(list)
+        # Fixed-size ring buffers for O(1) append + bounded memory.
+        self._latencies: dict[tuple[str, str], deque[float]] = {}
         self._max_samples = max_latency_samples
 
         # Memory usage (latest value per cache)
@@ -403,12 +403,11 @@ class InMemoryMetrics:
     ) -> None:
         key = (cache_name, operation)
         with self._lock:
-            samples = self._latencies[key]
-            samples.append(duration_seconds)
-
-            # Keep only recent samples
-            if len(samples) > self._max_samples:
-                samples.pop(0)
+            buf = self._latencies.get(key)
+            if buf is None:
+                buf = deque(maxlen=self._max_samples)
+                self._latencies[key] = buf
+            buf.append(duration_seconds)
 
     def record_error(
         self,

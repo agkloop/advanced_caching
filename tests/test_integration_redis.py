@@ -18,10 +18,9 @@ except ImportError:
     HAS_REDIS = False
 
 from advanced_caching import (
+    cache,
+    bg,
     CacheEntry,
-    TTLCache,
-    SWRCache,
-    BGCache,
     RedisCache,
     HybridCache,
     InMemCache,
@@ -32,7 +31,7 @@ from advanced_caching import (
 @pytest.fixture(autouse=True)
 async def reset_scheduler():
     yield
-    BGCache.shutdown(wait=False)
+    bg.shutdown(wait=False)
 
 
 @pytest.fixture(scope="module")
@@ -41,8 +40,12 @@ def redis_container():
     if not HAS_REDIS:
         pytest.skip("testcontainers[redis] not installed")
 
-    container = RedisContainer(image="redis:7-alpine")
-    container.start()
+    try:
+        container = RedisContainer(image="redis:7-alpine")
+        container.start()
+    except Exception:
+        pytest.skip("Docker not available — skipping Redis integration tests")
+
     yield container
     container.stop()
 
@@ -188,14 +191,14 @@ class TestRedisCache:
 
 @pytest.mark.asyncio
 class TestTTLCacheWithRedis:
-    """Test TTLCache decorator with Redis backend."""
+    """Test cache() TTL decorator with Redis backend."""
 
     async def test_ttlcache_redis_basic(self, redis_client):
-        """Test TTLCache with Redis backend."""
+        """Test cache() with Redis backend."""
         calls = {"n": 0}
-        cache = RedisCache(redis_client, prefix="ttl:")
+        store = RedisCache(redis_client, prefix="ttl:")
 
-        @TTLCache.cached("user:{}", ttl=60, cache=cache)
+        @cache(60, key="user:{}", store=store)
         async def get_user(user_id: int):
             calls["n"] += 1
             return {"id": user_id, "name": f"User{user_id}"}
@@ -213,11 +216,11 @@ class TestTTLCacheWithRedis:
         assert calls["n"] == 2
 
     async def test_ttlcache_redis_expiration(self, redis_client):
-        """Test TTLCache with Redis respects TTL."""
+        """Test cache() with Redis respects TTL."""
         calls = {"n": 0}
-        cache = RedisCache(redis_client, prefix="ttl:")
+        store = RedisCache(redis_client, prefix="ttl:")
 
-        @TTLCache.cached("data:{}", ttl=1, cache=cache)
+        @cache(1, key="data:{}", store=store)
         async def get_data(key: str):
             calls["n"] += 1
             return f"data_{key}"
@@ -236,11 +239,11 @@ class TestTTLCacheWithRedis:
         assert calls["n"] == 2
 
     async def test_ttlcache_redis_named_template(self, redis_client):
-        """Test TTLCache with Redis using named key template."""
+        """Test cache() with Redis using named key template."""
         calls = {"n": 0}
-        cache = RedisCache(redis_client, prefix="ttl:")
+        store = RedisCache(redis_client, prefix="ttl:")
 
-        @TTLCache.cached("product:{product_id}", ttl=60, cache=cache)
+        @cache(60, key="product:{product_id}", store=store)
         async def get_product(*, product_id: int):
             calls["n"] += 1
             return {"id": product_id, "name": f"Product{product_id}"}
@@ -255,14 +258,14 @@ class TestTTLCacheWithRedis:
 
 @pytest.mark.asyncio
 class TestSWRCacheWithRedis:
-    """Test SWRCache with Redis backend."""
+    """Test cache() SWR with Redis backend."""
 
     async def test_swrcache_redis_basic(self, redis_client):
-        """Test SWRCache with Redis backend."""
+        """Test SWR cache with Redis backend."""
         calls = {"n": 0}
-        cache = RedisCache(redis_client, prefix="swr:")
+        store = RedisCache(redis_client, prefix="swr:")
 
-        @SWRCache.cached("product:{}", ttl=1, stale_ttl=1, cache=cache)
+        @cache(1, stale=1, key="product:{}", store=store)
         async def get_product(product_id: int):
             calls["n"] += 1
             return {"id": product_id, "count": calls["n"]}
@@ -276,11 +279,11 @@ class TestSWRCacheWithRedis:
         assert calls["n"] == 1
 
     async def test_swrcache_redis_stale_serve(self, redis_client):
-        """Test SWRCache serves stale data while refreshing."""
+        """Test SWR serves stale data while refreshing."""
         calls = {"n": 0}
-        cache = RedisCache(redis_client, prefix="swr:")
+        store = RedisCache(redis_client, prefix="swr:")
 
-        @SWRCache.cached("data:{}", ttl=0.3, stale_ttl=0.5, cache=cache)
+        @cache(0.3, stale=0.5, key="data:{}", store=store)
         async def get_data(key: str):
             calls["n"] += 1
             return {"key": key, "count": calls["n"]}
@@ -302,19 +305,14 @@ class TestSWRCacheWithRedis:
 
 @pytest.mark.asyncio
 class TestBGCacheWithRedis:
-    """Test BGCache with Redis backend."""
+    """Test bg() with Redis backend."""
 
     async def test_bgcache_redis_sync_loader(self, redis_client):
-        """Test BGCache with sync loader and Redis backend."""
+        """Test bg with async loader and Redis backend."""
         calls = {"n": 0}
-        cache = RedisCache(redis_client, prefix="bg:")
+        store = RedisCache(redis_client, prefix="bg:")
 
-        @BGCache.register_loader(
-            key="inventory",
-            interval_seconds=10,
-            run_immediately=True,
-            cache=cache,
-        )
+        @bg(10, key="inventory", store=store, run_immediately=True)
         async def load_inventory():
             calls["n"] += 1
             return {"items": [f"item_{i}" for i in range(3)]}
@@ -330,19 +328,19 @@ class TestBGCacheWithRedis:
         assert calls["n"] == 1
 
     async def test_bgcache_redis_with_error_handler(self, redis_client):
-        """Test BGCache error handling with Redis."""
+        """Test bg error handling with Redis."""
         errors = []
-        cache = RedisCache(redis_client, prefix="bg:")
+        store = RedisCache(redis_client, prefix="bg:")
 
         def on_error(exc):
             errors.append(exc)
 
-        @BGCache.register_loader(
+        @bg(
+            10,
             key="failing_loader",
-            interval_seconds=10,
+            store=store,
             run_immediately=True,
             on_error=on_error,
-            cache=cache,
         )
         async def failing_loader():
             raise ValueError("Simulated failure")
@@ -390,9 +388,9 @@ class TestHybridCacheWithRedis:
 
     @pytest.mark.asyncio
     async def test_hybridcache_with_ttlcache(self, redis_client):
-        """Test TTLCache using HybridCache backend."""
+        """Test cache() using HybridCache backend."""
         l2 = RedisCache(redis_client, prefix="hybrid_ttl:")
-        cache = HybridCache(
+        store = HybridCache(
             l1_cache=InMemCache(),
             l2_cache=l2,
             l1_ttl=60,
@@ -400,7 +398,7 @@ class TestHybridCacheWithRedis:
 
         calls = {"n": 0}
 
-        @TTLCache.cached("user:{}", ttl=60, cache=cache)
+        @cache(60, key="user:{}", store=store)
         async def get_user(user_id: int):
             calls["n"] += 1
             return {"id": user_id}
@@ -509,18 +507,13 @@ class TestHybridCacheWithRedis:
 
     @pytest.mark.asyncio
     async def test_hybridcache_with_bgcache_and_l2_ttl(self, redis_client):
-        """Test BGCache with HybridCache using l2_ttl."""
+        """Test bg() with HybridCache using l2_ttl."""
         l2 = RedisCache(redis_client, prefix="hybrid_bg:")
-        cache = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=10, l2_ttl=60)
+        store = HybridCache(l1_cache=InMemCache(), l2_cache=l2, l1_ttl=10, l2_ttl=60)
 
         calls = {"n": 0}
 
-        @BGCache.register_loader(
-            key="config_with_l2",
-            interval_seconds=30,
-            run_immediately=True,
-            cache=cache,
-        )
+        @bg(30, key="config_with_l2", store=store, run_immediately=True)
         async def load_config():
             calls["n"] += 1
             return {"setting": "value", "count": calls["n"]}
@@ -687,17 +680,18 @@ class TestCacheRehydration:
     """Test that decorators can retrieve existing data from Redis without re-executing functions."""
 
     async def test_ttlcache_rehydrates_from_redis(self, redis_client):
-        """Test TTLCache retrieves existing Redis data without executing function."""
-        # Pre-populate Redis
+        """Test cache() retrieves existing Redis data without executing function."""
+        # Pre-populate Redis using the library's own serialization format
         test_data = {"result": "from_redis"}
-        redis_client.setex("compute:42", 60, pickle.dumps(test_data))
+        pre_cache = RedisCache(redis_client)
+        pre_cache.set("compute:42", test_data, ttl=60)
 
         call_count = 0
 
-        @TTLCache.cached(
-            "compute:{}",
-            ttl=60,
-            cache=lambda: HybridCache(
+        @cache(
+            60,
+            key="compute:{}",
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -719,7 +713,7 @@ class TestCacheRehydration:
         assert call_count == 0
 
     async def test_swrcache_rehydrates_from_redis(self, redis_client):
-        """Test SWRCache retrieves existing Redis data without executing function."""
+        """Test SWR cache retrieves existing Redis data without executing function."""
         # Pre-populate Redis with CacheEntry
         now = time.time()
         entry = CacheEntry(
@@ -730,11 +724,11 @@ class TestCacheRehydration:
 
         call_count = 0
 
-        @SWRCache.cached(
-            "fetch:{}",
-            ttl=60,
-            stale_ttl=30,
-            cache=lambda: HybridCache(
+        @cache(
+            60,
+            stale=30,
+            key="fetch:{}",
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -756,18 +750,19 @@ class TestCacheRehydration:
         assert call_count == 0
 
     async def test_bgcache_rehydrates_from_redis(self, redis_client):
-        """Test BGCache retrieves existing Redis data without executing function on init."""
-        # Pre-populate Redis
+        """Test bg() retrieves existing Redis data without executing function on init."""
+        # Pre-populate Redis using the library's own serialization format
         test_data = {"users": ["Alice", "Bob", "Charlie"]}
-        redis_client.setex("users_list_rehydrate", 60, pickle.dumps(test_data))
+        pre_cache = RedisCache(redis_client)
+        pre_cache.set("users_list_rehydrate", test_data, ttl=60)
 
         call_count = 0
 
-        @BGCache.register_loader(
+        @bg(
+            60,
             key="users_list_rehydrate",
-            interval_seconds=60,
             run_immediately=True,
-            cache=lambda: HybridCache(
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -786,18 +781,18 @@ class TestCacheRehydration:
         assert result == test_data
         assert call_count == 0
 
-        BGCache.shutdown(wait=False)
+        bg.shutdown(wait=False)
 
     async def test_ttlcache_executes_on_cache_miss(self, redis_client):
-        """Test TTLCache executes function when Redis is empty."""
+        """Test cache() executes function when Redis is empty."""
         redis_client.flushdb()
 
         call_count = 0
 
-        @TTLCache.cached(
-            "compute:{}",
-            ttl=60,
-            cache=lambda: HybridCache(
+        @cache(
+            60,
+            key="compute:{}",
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -819,16 +814,16 @@ class TestCacheRehydration:
         assert call_count == 1
 
     async def test_swrcache_executes_on_cache_miss(self, redis_client):
-        """Test SWRCache executes function when Redis is empty."""
+        """Test SWR cache executes function when Redis is empty."""
         redis_client.flushdb()
 
         call_count = 0
 
-        @SWRCache.cached(
-            "fetch:{}",
-            ttl=60,
-            stale_ttl=30,
-            cache=lambda: HybridCache(
+        @cache(
+            60,
+            stale=30,
+            key="fetch:{}",
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -850,16 +845,16 @@ class TestCacheRehydration:
         assert call_count == 1
 
     async def test_bgcache_executes_on_cache_miss(self, redis_client):
-        """Test BGCache executes function on init when Redis is empty."""
+        """Test bg() executes function on init when Redis is empty."""
         redis_client.flushdb()
 
         call_count = 0
 
-        @BGCache.register_loader(
+        @bg(
+            60,
             key="empty_test_bgcache",
-            interval_seconds=60,
             run_immediately=True,
-            cache=lambda: HybridCache(
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -879,20 +874,21 @@ class TestCacheRehydration:
         assert result == {"data": "fresh_load"}
         assert call_count == 1
 
-        BGCache.shutdown(wait=False)
+        bg.shutdown(wait=False)
 
     async def test_ttlcache_different_args_separate_entries(self, redis_client):
-        """Test TTLCache creates separate cache entries for different arguments."""
+        """Test cache() creates separate cache entries for different arguments."""
         # Pre-populate Redis with data for arg=10
         test_data = {"result": "from_redis_10"}
-        redis_client.setex("compute:10", 60, pickle.dumps(test_data))
+        pre_cache = RedisCache(redis_client)
+        pre_cache.set("compute:10", test_data, ttl=60)
 
         call_count = 0
 
-        @TTLCache.cached(
-            "compute:{}",
-            ttl=60,
-            cache=lambda: HybridCache(
+        @cache(
+            60,
+            key="compute:{}",
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(),
                 l2_cache=RedisCache(redis_client=redis_client),
                 l1_ttl=60,
@@ -941,10 +937,10 @@ class TestRedisPerformance:
 
     @pytest.mark.asyncio
     async def test_ttlcache_with_redis_performance(self, redis_client):
-        """Test TTLCache performance with Redis backend."""
-        cache = RedisCache(redis_client, prefix="perf_ttl:")
+        """Test cache() performance with Redis backend."""
+        store = RedisCache(redis_client, prefix="perf_ttl:")
 
-        @TTLCache.cached("item:{}", ttl=60, cache=cache)
+        @cache(60, key="item:{}", store=store)
         async def get_item(item_id: int):
             return {"id": item_id}
 
@@ -957,7 +953,7 @@ class TestRedisPerformance:
 
         avg_time_ms = (duration / 1000) * 1000
 
-        assert avg_time_ms < 25, f"TTLCache hit too slow: {avg_time_ms:.3f}ms"
+        assert avg_time_ms < 25, f"cache hit too slow: {avg_time_ms:.3f}ms"
 
 
 if __name__ == "__main__":

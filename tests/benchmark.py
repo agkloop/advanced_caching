@@ -1,241 +1,259 @@
 """
-Benchmarks for advanced_caching (Async-only architecture).
+Benchmark harness for advanced-caching hot paths.
+
+Usage:
+    uv run python tests/benchmark.py
+    BENCH_N=200000 uv run python tests/benchmark.py
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import random
-import sys
+import statistics
 import time
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from statistics import mean, median, stdev
-from typing import Dict, List
+from typing import Any
 
-from advanced_caching import BGCache, SWRCache, TTLCache
+from advanced_caching import cache, bg, InMemCache, ChainCache
+from advanced_caching.metrics import InMemoryMetrics
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+N = int(os.getenv("BENCH_N", "100000"))
+WARMUP = 1000
+
+
+def _timer(fn, n: int) -> tuple[float, float]:
+    """Return (total_seconds, ops_per_second)."""
+    for _ in range(WARMUP):
+        fn()
+    t0 = time.perf_counter()
+    for _ in range(n):
+        fn()
+    elapsed = time.perf_counter() - t0
+    return elapsed, n / elapsed
+
+
+async def _atimer(coro_fn, n: int) -> tuple[float, float]:
+    for _ in range(WARMUP):
+        await coro_fn()
+    t0 = time.perf_counter()
+    for _ in range(n):
+        await coro_fn()
+    elapsed = time.perf_counter() - t0
+    return elapsed, n / elapsed
+
+
+def _row(label: str, elapsed: float, ops: float) -> None:
+    print(f"  {label:<42}  {ops / 1e6:>6.2f}M ops/s  ({elapsed * 1000:.1f} ms total)")
 
 
 # ---------------------------------------------------------------------------
-# Config + helpers
+# Benchmarks
 # ---------------------------------------------------------------------------
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    return int(raw)
+def bench_inmem_raw():
+    """Baseline: raw InMemCache.get() / .set()."""
+    store = InMemCache()
+    store.set("k", {"v": 1}, ttl=3600)
+    elapsed, ops = _timer(lambda: store.get("k"), N)
+    _row("InMemCache.get() raw", elapsed, ops)
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    return float(raw)
+def bench_cache_sync_hit():
+    """@cache sync hit path (static key)."""
+
+    @cache(3600, key="bench_sync")
+    def fn() -> dict:
+        return {"v": 1}
+
+    fn()  # prime
+    elapsed, ops = _timer(fn, N)
+    _row("@cache sync hit (static key)", elapsed, ops)
 
 
-@dataclass(frozen=True)
-class Config:
-    seed: int = 12345
-    work_ms: float = 5.0
-    warmup: int = 10
-    runs: int = 300
-    mixed_key_space: int = 100
-    mixed_runs: int = 500
+def bench_cache_sync_keyed():
+    """@cache sync with named key template."""
+
+    @cache(3600, key="bench:{user_id}")
+    def get_user(user_id: int) -> dict:
+        return {"id": user_id}
+
+    get_user(1)  # prime
+    elapsed, ops = _timer(lambda: get_user(1), N)
+    _row("@cache sync hit (named key)", elapsed, ops)
 
 
-CFG = Config(
-    seed=_env_int("BENCH_SEED", 12345),
-    work_ms=_env_float("BENCH_WORK_MS", 5.0),
-    warmup=_env_int("BENCH_WARMUP", 10),
-    runs=_env_int("BENCH_RUNS", 300),
-    mixed_key_space=_env_int("BENCH_MIXED_KEY_SPACE", 100),
-    mixed_runs=_env_int("BENCH_MIXED_RUNS", 500),
-)
-RNG = random.Random(CFG.seed)
+def bench_cache_async_hit():
+    """@cache async hit path."""
+
+    @cache(3600, key="bench_async")
+    async def fn() -> dict:
+        return {"v": 1}
+
+    async def run():
+        await fn()  # prime
+        elapsed, ops = await _atimer(fn, N)
+        _row("@cache async hit (static key)", elapsed, ops)
+
+    asyncio.run(run())
 
 
-@dataclass(frozen=True)
-class Stats:
-    label: str
-    notes: str
-    runs: int
-    median_ms: float
-    mean_ms: float
-    stdev_ms: float
+def bench_cache_swr_hit():
+    """@cache SWR path — serve stale, no refresh triggered (stale window)."""
+
+    @cache(0.0001, stale=3600, key="bench_swr")
+    def fn() -> dict:
+        return {"v": 1}
+
+    fn()  # prime
+    time.sleep(0.001)  # go stale but inside window
+    elapsed, ops = _timer(fn, N)
+    _row("@cache SWR stale-serve", elapsed, ops)
 
 
-async def async_io_bound_call(user_id: int) -> dict:
-    await asyncio.sleep(CFG.work_ms / 1000.0)
-    return {"id": user_id, "name": f"User{user_id}"}
+def bench_cache_miss():
+    """@cache sync miss + set (measures miss path overhead)."""
+    calls = {"n": 0}
+
+    @cache(0, key="bench_miss:{x}")  # ttl=0 → always miss
+    def fn(x: int) -> int:
+        calls["n"] += 1
+        return x
+
+    elapsed, ops = _timer(lambda: fn(1), N)
+    _row("@cache sync miss (ttl=0)", elapsed, ops)
 
 
-async def _timed_async(fn, warmup: int, runs: int) -> List[float]:
-    for _ in range(warmup):
-        await fn()
-    out: List[float] = []
-    for _ in range(runs):
-        t0 = time.perf_counter()
-        await fn()
-        out.append((time.perf_counter() - t0) * 1000.0)
-    return out
+def bench_chain_cache():
+    """ChainCache (L1 InMem + L2 InMem) hit on L1."""
+    l1, l2 = InMemCache(), InMemCache()
+    chain = ChainCache.build(l1, l2, ttls=[60, 3600])
+
+    @cache(3600, key="chain_bench", store=chain)
+    def fn() -> dict:
+        return {"v": 1}
+
+    fn()  # prime
+    elapsed, ops = _timer(fn, N)
+    _row("@cache ChainCache L1 hit", elapsed, ops)
 
 
-def stats_from_samples(
-    label: str, notes: str, runs: int, samples: List[float]
-) -> Stats:
-    return Stats(
-        label,
-        notes,
-        runs,
-        median(samples),
-        mean(samples),
-        stdev(samples) if len(samples) > 1 else 0.0,
+def bench_bg_read():
+    """bg.read() callable (local dict lookup only)."""
+    store = InMemCache()
+    store.set("bg_bench", {"v": 1}, ttl=3600)
+    reader = bg.read("bg_bench", interval=60, store=store)
+    elapsed, ops = _timer(reader, N)
+    _row("bg.read() local hit", elapsed, ops)
+    bg.shutdown()
+
+
+def bench_with_metrics():
+    """@cache + InMemoryMetrics overhead."""
+    m = InMemoryMetrics()
+
+    @cache(3600, key="bench_metrics", metrics=m)
+    def fn() -> dict:
+        return {"v": 1}
+
+    fn()  # prime
+    elapsed, ops = _timer(fn, N)
+    _row("@cache sync hit + InMemoryMetrics", elapsed, ops)
+
+
+def bench_cache_callable_key():
+    """@cache sync with callable key (lambda) vs named template."""
+    import hashlib
+
+    @cache(3600, key=lambda user_id: f"bench_callable:{user_id}")
+    def fn_lambda(user_id: int) -> dict:
+        return {"id": user_id}
+
+    @cache(3600, key="bench_template:{user_id}")
+    def fn_template(user_id: int) -> dict:
+        return {"id": user_id}
+
+    @cache(
+        3600,
+        key=lambda user_id: (
+            f"bench_hash:{hashlib.md5(str(user_id).encode()).hexdigest()[:8]}"
+        ),
     )
+    def fn_hash(user_id: int) -> dict:
+        return {"id": user_id}
+
+    fn_lambda(1)
+    fn_template(1)
+    fn_hash(1)
+
+    elapsed, ops = _timer(lambda: fn_lambda(1), N)
+    _row("@cache sync hit (callable λ key)", elapsed, ops)
+
+    elapsed, ops = _timer(lambda: fn_template(1), N)
+    _row("@cache sync hit (template key, same data)", elapsed, ops)
+
+    elapsed, ops = _timer(lambda: fn_hash(1), N)
+    _row("@cache sync hit (callable hash key)", elapsed, ops)
 
 
-def print_table(title: str, rows: List[Stats]) -> None:
-    print("\n" + title)
-    print("-" * len(title))
-    print(
-        f"{'Strategy':<22} {'Median (ms)':>12} {'Mean (ms)':>12} {'Stdev (ms)':>12}  Notes"
-    )
-    for r in rows:
-        print(
-            f"{r.label:<22} {r.median_ms:>12.4f} {r.mean_ms:>12.4f} {r.stdev_ms:>12.4f}  {r.notes}"
-        )
+def bench_cache_callable_key_async():
+    """@cache async with callable key."""
 
+    @cache(3600, key=lambda tenant, uid: f"bench_async_callable:{tenant}:{uid}")
+    async def fn(tenant: str, uid: int) -> dict:
+        return {"tenant": tenant, "uid": uid}
 
-def append_json_log(
-    status: str, error: str | None, sections: Dict[str, List[Stats]]
-) -> None:
-    payload = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
-        "status": status,
-        "error": error,
-        "command": "python " + " ".join(sys.argv),
-        "python": sys.version.split()[0],
-        "config": {
-            "seed": CFG.seed,
-            "work_ms": CFG.work_ms,
-            "warmup": CFG.warmup,
-            "runs": CFG.runs,
-            "mixed_key_space": CFG.mixed_key_space,
-            "mixed_runs": CFG.mixed_runs,
-        },
-        "results": {
-            name: [
-                {
-                    "label": s.label,
-                    "notes": s.notes,
-                    "runs": s.runs,
-                    "median_ms": round(s.median_ms, 6),
-                    "mean_ms": round(s.mean_ms, 6),
-                    "stdev_ms": round(s.stdev_ms, 6),
-                }
-                for s in rows
-            ]
-            for name, rows in sections.items()
-        },
-    }
-    try:
-        log_path = Path(__file__).resolve().parent.parent / "benchmarks.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    async def run():
+        await fn("acme", 1)  # prime
+        elapsed, ops = await _atimer(lambda: fn("acme", 1), N)
+        _row("@cache async hit (callable λ key)", elapsed, ops)
 
-
-def shutdown_schedulers() -> None:
-    try:
-        BGCache.shutdown(wait=False)
-    except Exception:
-        pass
+    asyncio.run(run())
 
 
 # ---------------------------------------------------------------------------
-# Scenarios
+# Runner
 # ---------------------------------------------------------------------------
-
-
-async def scenario_hot_hits() -> List[Stats]:
-    """Benchmark hot cache hits for all strategies."""
-
-    # 1. TTLCache
-    @TTLCache.cached("bench:ttl:{}", ttl=60)
-    async def ttl_fn(user_id: int) -> dict:
-        return await async_io_bound_call(user_id)
-
-    # Prime cache
-    await ttl_fn(1)
-
-    ttl_samples = await _timed_async(
-        lambda: ttl_fn(1), warmup=CFG.warmup, runs=CFG.runs
-    )
-    ttl_stats = stats_from_samples("TTLCache", "hot hit", CFG.runs, ttl_samples)
-
-    # 2. SWRCache
-    @SWRCache.cached("bench:swr:{}", ttl=60, stale_ttl=30)
-    async def swr_fn(user_id: int) -> dict:
-        return await async_io_bound_call(user_id)
-
-    # Prime cache
-    await swr_fn(1)
-
-    swr_samples = await _timed_async(
-        lambda: swr_fn(1), warmup=CFG.warmup, runs=CFG.runs
-    )
-    swr_stats = stats_from_samples("SWRCache", "hot hit", CFG.runs, swr_samples)
-
-    # 3. BGCache
-    @BGCache.register_loader("bench:bg", interval_seconds=60, run_immediately=True)
-    async def bg_loader() -> dict:
-        return await async_io_bound_call(1)
-
-    # Wait for load
-    await asyncio.sleep(0.05)
-
-    bg_samples = await _timed_async(
-        lambda: bg_loader(), warmup=CFG.warmup, runs=CFG.runs
-    )
-    bg_stats = stats_from_samples("BGCache", "preloaded", CFG.runs, bg_samples)
-
-    return [ttl_stats, swr_stats, bg_stats]
-
-
-async def run_benchmarks() -> Dict[str, List[Stats]]:
-    return {
-        "hot_hits": await scenario_hot_hits(),
-    }
 
 
 def main() -> None:
-    status = "ok"
-    error = None
-    sections: Dict[str, List[Stats]] = {}
+    print(f"\n{'=' * 65}")
+    print(f"  advanced-caching benchmark  ·  N={N:,} iterations per test")
+    print(f"{'=' * 65}")
 
-    print("advanced_caching benchmark (Async-only)")
-    print(f"work_ms={CFG.work_ms} seed={CFG.seed} warmup={CFG.warmup} runs={CFG.runs}")
+    suites = [
+        ("Storage baseline", [bench_inmem_raw]),
+        (
+            "@cache decorator",
+            [
+                bench_cache_sync_hit,
+                bench_cache_sync_keyed,
+                bench_cache_async_hit,
+                bench_cache_swr_hit,
+                bench_cache_miss,
+            ],
+        ),
+        (
+            "Callable keys",
+            [
+                bench_cache_callable_key,
+                bench_cache_callable_key_async,
+            ],
+        ),
+        ("Multi-level", [bench_chain_cache]),
+        ("bg writer/reader", [bench_bg_read]),
+        ("With metrics", [bench_with_metrics]),
+    ]
 
-    try:
-        sections = asyncio.run(run_benchmarks())
-        print_table("Hot Cache Hits", sections["hot_hits"])
-    except KeyboardInterrupt:
-        status = "interrupted"
-        error = "KeyboardInterrupt"
-        raise
-    except Exception as e:
-        status = "error"
-        error = f"{type(e).__name__}: {e}"
-        raise
-    finally:
-        shutdown_schedulers()
-        append_json_log(status=status, error=error, sections=sections)
+    for section, fns in suites:
+        print(f"\n  ── {section}")
+        for fn in fns:
+            fn()
+
+    print(f"\n{'=' * 65}\n")
 
 
 if __name__ == "__main__":

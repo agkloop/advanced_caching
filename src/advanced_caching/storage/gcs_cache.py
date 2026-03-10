@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .utils import CacheEntry, Serializer, _BUILTIN_SERIALIZERS, _hash_bytes
+from .utils import CacheEntry, CacheStorage
+from ..serializers import (
+    Serializer,
+    pack_entry,
+    unpack_entry,
+    resolve as _resolve_serializer,
+)
 
 try:
     from google.cloud import storage as gcs
@@ -12,95 +20,77 @@ except ImportError:  # pragma: no cover - optional
     gcs = None
 
 
-class GCSCache:
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.blake2b(data, digest_size=16).hexdigest()
+
+
+class GCSCache(CacheStorage):
+    """Google Cloud Storage-backed cache.
+
+    Pass any :class:`~advanced_caching.serializers.Serializer` instance.
+    """
+
     def __init__(
         self,
         bucket: str,
         prefix: str = "",
         client: Any | None = None,
-        serializer: str | Serializer | None = "pickle",
+        serializer: Serializer | None = None,
         compress: bool = True,
         compress_level: int = 6,
         dedupe_writes: bool = False,
     ):
         if gcs is None:
             raise ImportError(
-                "google-cloud-storage required for GCSCache. Install: pip install google-cloud-storage"
+                "google-cloud-storage required for GCSCache. "
+                "Install: pip install google-cloud-storage"
             )
         self.bucket_name = bucket
         self.prefix = prefix
         self.client = client or gcs.Client()
         self.bucket = self.client.bucket(bucket)
+        self._ser = _resolve_serializer(serializer)
         self.compress = compress
         self.compress_level = compress_level
-        self.serializer = self._resolve_serializer(serializer)
         self._dedupe_writes = dedupe_writes
 
-    def _resolve_serializer(self, serializer: str | Serializer | None) -> Serializer:
-        if serializer is None:
-            serializer = "pickle"
-        if isinstance(serializer, str):
-            name = serializer.lower()
-            if name not in _BUILTIN_SERIALIZERS:
-                raise ValueError("Unsupported serializer. Use 'pickle' or 'json'.")
-            return _BUILTIN_SERIALIZERS[name]
-        if hasattr(serializer, "dumps") and hasattr(serializer, "loads"):
-            return serializer
-        raise TypeError("serializer must be a string or provide dumps/loads methods")
-
     def _make_blob(self, key: str):
-        path = f"{self.prefix}{key}"
-        return self.bucket.blob(path)
+        return self.bucket.blob(f"{self.prefix}{key}")
 
-    def _serialize(self, value: Any) -> bytes:
-        data = self.serializer.dumps(value)
-        if self.compress:
-            return gzip.compress(data, compresslevel=self.compress_level)
-        return data
+    def _encode(self, entry: CacheEntry) -> bytes:
+        data = pack_entry(entry, self._ser)
+        return (
+            gzip.compress(data, compresslevel=self.compress_level)
+            if self.compress
+            else data
+        )
 
-    def _deserialize(self, data: bytes) -> Any:
-        if self.compress:
-            data = gzip.decompress(data)
-        return self.serializer.loads(data)
+    def _decode(self, raw: bytes) -> CacheEntry | None:
+        try:
+            data = gzip.decompress(raw) if self.compress else raw
+            return unpack_entry(data, self._ser)
+        except Exception:
+            return None
 
     def get(self, key: str) -> Any | None:
         blob = self._make_blob(key)
         try:
-            data = blob.download_as_bytes()
-            value = self._deserialize(data)
-            if isinstance(value, dict) and value.get("__ac_type") == "entry":
-                entry = CacheEntry(
-                    value=value.get("v"),
-                    fresh_until=float(value.get("f", 0.0)),
-                    created_at=float(value.get("c", 0.0)),
-                )
-                return entry.value if entry.is_fresh() else None
-            return value
+            entry = self._decode(blob.download_as_bytes())
+            if entry is None:
+                return None
+            return entry.value if entry.is_fresh() else None
         except Exception:
             return None
 
-    def set(self, key: str, value: Any, ttl: int = 0) -> None:
-        blob = self._make_blob(key)
-        import time
-
+    def set(self, key: str, value: Any, ttl: int | float = 0) -> None:
         now = time.time()
-        entry: CacheEntry | None = None
-        if isinstance(value, CacheEntry):
-            entry = value
-        elif ttl != 0:
-            entry = CacheEntry(value=value, fresh_until=now + ttl, created_at=now)
-
-        payload = (
-            {
-                "__ac_type": "entry",
-                "v": entry.value,
-                "f": entry.fresh_until,
-                "c": entry.created_at,
-            }
-            if entry
-            else value
+        entry = CacheEntry(
+            value=value,
+            fresh_until=now + ttl if ttl > 0 else float("inf"),
+            created_at=now,
         )
-        data = self._serialize(payload)
+        data = self._encode(entry)
+        blob = self._make_blob(key)
         try:
             if self._dedupe_writes:
                 try:
@@ -119,52 +109,35 @@ class GCSCache:
             raise RuntimeError(f"GCSCache set failed: {e}")
 
     def delete(self, key: str) -> None:
-        blob = self._make_blob(key)
         try:
-            blob.delete()
+            self._make_blob(key).delete()
         except Exception:
             pass
 
     def exists(self, key: str) -> bool:
-        blob = self._make_blob(key)
         try:
-            blob.reload()
+            self._make_blob(key).reload()
             return True
         except Exception:
             return False
 
-    def get_entry(self, key: str) -> CacheEntry | None:
-        blob = self._make_blob(key)
+    def get_entry(self, key: str, now: float | None = None) -> CacheEntry | None:
         try:
-            data = blob.download_as_bytes()
-            value = self._deserialize(data)
-            if isinstance(value, dict) and value.get("__ac_type") == "entry":
-                entry = CacheEntry(
-                    value=value.get("v"),
-                    fresh_until=float(value.get("f", 0.0)),
-                    created_at=float(value.get("c", 0.0)),
-                )
-                return entry
-            import time
-
-            now = time.time()
-            return CacheEntry(value=value, fresh_until=float("inf"), created_at=now)
+            return self._decode(self._make_blob(key).download_as_bytes())
         except Exception:
             return None
 
-    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
-        import time
-
+    def set_entry(
+        self, key: str, entry: CacheEntry, ttl: int | float | None = None
+    ) -> None:
         if ttl is not None:
             now = time.time()
-            entry = CacheEntry(value=entry.value, fresh_until=now + ttl, created_at=now)
-        payload = {
-            "__ac_type": "entry",
-            "v": entry.value,
-            "f": entry.fresh_until,
-            "c": entry.created_at,
-        }
-        data = self._serialize(payload)
+            entry = CacheEntry(
+                value=entry.value,
+                fresh_until=now + ttl if ttl > 0 else float("inf"),
+                created_at=now,
+            )
+        data = self._encode(entry)
         blob = self._make_blob(key)
         try:
             if self._dedupe_writes:
@@ -183,30 +156,36 @@ class GCSCache:
         except Exception as e:
             raise RuntimeError(f"GCSCache set_entry failed: {e}")
 
-    def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
-        blob = self._make_blob(key)
+    def set_if_not_exists(self, key: str, value: Any, ttl: int | float) -> bool:
+        now = time.time()
+        entry = CacheEntry(
+            value=value,
+            fresh_until=now + ttl if ttl > 0 else float("inf"),
+            created_at=now,
+        )
         try:
-            blob.upload_from_string(self._serialize(value), if_generation_match=0)
+            self._make_blob(key).upload_from_string(
+                self._encode(entry), if_generation_match=0
+            )
             return True
         except Exception:
             return False
 
     def get_many(self, keys: list[str]) -> dict[str, Any]:
         """Parallel fetch using threads."""
-        results = {}
-        with ThreadPoolExecutor(max_workers=min(32, len(keys) + 1)) as executor:
-            future_to_key = {executor.submit(self.get, key): key for key in keys}
-            for future in future_to_key:
-                key = future_to_key[future]
+        results: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=min(32, len(keys) + 1)) as ex:
+            future_to_key = {ex.submit(self.get, k): k for k in keys}
+            for future, k in future_to_key.items():
                 try:
                     val = future.result()
                     if val is not None:
-                        results[key] = val
+                        results[k] = val
                 except Exception:
                     pass
         return results
 
-    def set_many(self, mapping: dict[str, Any], ttl: int = 0) -> None:
+    def set_many(self, mapping: dict[str, Any], ttl: int | float = 0) -> None:
         """Parallel set using threads."""
-        with ThreadPoolExecutor(max_workers=min(32, len(mapping) + 1)) as executor:
-            executor.map(lambda item: self.set(item[0], item[1], ttl), mapping.items())
+        with ThreadPoolExecutor(max_workers=min(32, len(mapping) + 1)) as ex:
+            ex.map(lambda item: self.set(item[0], item[1], ttl), mapping.items())
