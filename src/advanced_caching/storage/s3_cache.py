@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .utils import CacheEntry, Serializer, _BUILTIN_SERIALIZERS, _hash_bytes
+from .utils import CacheEntry
+from ..serializers import Serializer, pack_entry, unpack_entry, resolve as _resolve_serializer
 
 try:
     import boto3
@@ -13,13 +15,22 @@ except ImportError:  # pragma: no cover - optional
     boto3 = None
 
 
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.blake2b(data, digest_size=16).hexdigest()
+
+
 class S3Cache:
+    """S3-backed cache storage.
+
+    Pass any :class:`~advanced_caching.serializers.Serializer` instance.
+    """
+
     def __init__(
         self,
         bucket: str,
         prefix: str = "",
         s3_client: Any | None = None,
-        serializer: str | Serializer | None = "pickle",
+        serializer: Serializer | None = None,
         compress: bool = True,
         compress_level: int = 6,
         dedupe_writes: bool = False,
@@ -29,93 +40,65 @@ class S3Cache:
         self.bucket = bucket
         self.prefix = prefix
         self.client = s3_client or boto3.client("s3")
+        self._ser = _resolve_serializer(serializer)
         self.compress = compress
         self.compress_level = compress_level
-        self.serializer = self._resolve_serializer(serializer)
         self._dedupe_writes = dedupe_writes
-
-    def _resolve_serializer(self, serializer: str | Serializer | None) -> Serializer:
-        if serializer is None:
-            serializer = "pickle"
-        if isinstance(serializer, str):
-            name = serializer.lower()
-            if name not in _BUILTIN_SERIALIZERS:
-                raise ValueError("Unsupported serializer. Use 'pickle' or 'json'.")
-            return _BUILTIN_SERIALIZERS[name]
-        if hasattr(serializer, "dumps") and hasattr(serializer, "loads"):
-            return serializer
-        raise TypeError("serializer must be a string or provide dumps/loads methods")
 
     def _make_key(self, key: str) -> str:
         return f"{self.prefix}{key}"
 
-    def _serialize(self, value: Any) -> bytes:
-        data = self.serializer.dumps(value)
-        if self.compress:
-            return gzip.compress(data, compresslevel=self.compress_level)
-        return data
+    def _encode(self, entry: CacheEntry) -> bytes:
+        data = pack_entry(entry, self._ser)
+        return (
+            gzip.compress(data, compresslevel=self.compress_level)
+            if self.compress
+            else data
+        )
 
-    def _deserialize(self, data: bytes) -> Any:
-        if self.compress:
-            data = gzip.decompress(data)
-        return self.serializer.loads(data)
+    def _decode(self, raw: bytes) -> CacheEntry | None:
+        try:
+            data = gzip.decompress(raw) if self.compress else raw
+            return unpack_entry(data, self._ser)
+        except Exception:
+            return None
 
     def get(self, key: str) -> Any | None:
         try:
             obj = self.client.get_object(Bucket=self.bucket, Key=self._make_key(key))
-            body = obj["Body"].read()
-            value = self._deserialize(body)
-            if isinstance(value, dict) and value.get("__ac_type") == "entry":
-                entry = CacheEntry(
-                    value=value.get("v"),
-                    fresh_until=float(value.get("f", 0.0)),
-                    created_at=float(value.get("c", 0.0)),
-                )
-                return entry.value if entry.is_fresh() else None
-            return value
+            entry = self._decode(obj["Body"].read())
+            if entry is None:
+                return None
+            return entry.value if entry.is_fresh() else None
         except Exception:
             return None
 
-    def set(self, key: str, value: Any, ttl: int = 0) -> None:
+    def set(self, key: str, value: Any, ttl: int | float = 0) -> None:
         try:
             now = time.time()
-            entry: CacheEntry | None = None
-            if isinstance(value, CacheEntry):
-                entry = value
-            elif ttl != 0:
-                entry = CacheEntry(value=value, fresh_until=now + ttl, created_at=now)
-
-            payload = (
-                {
-                    "__ac_type": "entry",
-                    "v": entry.value,
-                    "f": entry.fresh_until,
-                    "c": entry.created_at,
-                }
-                if entry
-                else value
+            entry = CacheEntry(
+                value=value,
+                fresh_until=now + ttl if ttl > 0 else float("inf"),
+                created_at=now,
             )
-            body = self._serialize(payload)
-
+            body = self._encode(entry)
             if self._dedupe_writes:
                 try:
                     head = self.client.head_object(
                         Bucket=self.bucket, Key=self._make_key(key)
                     )
-                    if head and head.get("Metadata", {}).get("ac-hash") == _hash_bytes(
-                        body
-                    ):
+                    if head.get("Metadata", {}).get("ac-hash") == _hash_bytes(body):
                         return
                 except Exception:
                     pass
-            put_kwargs = {
+            kwargs: dict[str, Any] = {
                 "Bucket": self.bucket,
                 "Key": self._make_key(key),
                 "Body": body,
             }
             if self._dedupe_writes:
-                put_kwargs["Metadata"] = {"ac-hash": _hash_bytes(body)}
-            self.client.put_object(**put_kwargs)
+                kwargs["Metadata"] = {"ac-hash": _hash_bytes(body)}
+            self.client.put_object(**kwargs)
         except Exception as e:
             raise RuntimeError(f"S3Cache set failed: {e}")
 
@@ -132,58 +115,46 @@ class S3Cache:
         except Exception:
             return False
 
-    def get_entry(self, key: str) -> CacheEntry | None:
+    def get_entry(self, key: str, now: float | None = None) -> CacheEntry | None:
         try:
             obj = self.client.get_object(Bucket=self.bucket, Key=self._make_key(key))
-            body = obj["Body"].read()
-            value = self._deserialize(body)
-            if isinstance(value, dict) and value.get("__ac_type") == "entry":
-                entry = CacheEntry(
-                    value=value.get("v"),
-                    fresh_until=float(value.get("f", 0.0)),
-                    created_at=float(value.get("c", 0.0)),
-                )
-                return entry
-            now = time.time()
-            return CacheEntry(value=value, fresh_until=float("inf"), created_at=now)
+            return self._decode(obj["Body"].read())
         except Exception:
             return None
 
-    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
+    def set_entry(
+        self, key: str, entry: CacheEntry, ttl: int | float | None = None
+    ) -> None:
         if ttl is not None:
             now = time.time()
-            entry = CacheEntry(value=entry.value, fresh_until=now + ttl, created_at=now)
-        payload = {
-            "__ac_type": "entry",
-            "v": entry.value,
-            "f": entry.fresh_until,
-            "c": entry.created_at,
-        }
+            entry = CacheEntry(
+                value=entry.value,
+                fresh_until=now + ttl if ttl > 0 else float("inf"),
+                created_at=now,
+            )
         try:
-            body = self._serialize(payload)
+            body = self._encode(entry)
             if self._dedupe_writes:
                 try:
                     head = self.client.head_object(
                         Bucket=self.bucket, Key=self._make_key(key)
                     )
-                    if head and head.get("Metadata", {}).get("ac-hash") == _hash_bytes(
-                        body
-                    ):
+                    if head.get("Metadata", {}).get("ac-hash") == _hash_bytes(body):
                         return
                 except Exception:
                     pass
-            put_kwargs = {
+            kwargs: dict[str, Any] = {
                 "Bucket": self.bucket,
                 "Key": self._make_key(key),
                 "Body": body,
             }
             if self._dedupe_writes:
-                put_kwargs["Metadata"] = {"ac-hash": _hash_bytes(body)}
-            self.client.put_object(**put_kwargs)
+                kwargs["Metadata"] = {"ac-hash": _hash_bytes(body)}
+            self.client.put_object(**kwargs)
         except Exception as e:
             raise RuntimeError(f"S3Cache set_entry failed: {e}")
 
-    def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
+    def set_if_not_exists(self, key: str, value: Any, ttl: int | float) -> bool:
         if self.exists(key):
             return False
         try:
@@ -194,20 +165,19 @@ class S3Cache:
 
     def get_many(self, keys: list[str]) -> dict[str, Any]:
         """Parallel fetch using threads."""
-        results = {}
-        with ThreadPoolExecutor(max_workers=min(32, len(keys) + 1)) as executor:
-            future_to_key = {executor.submit(self.get, key): key for key in keys}
-            for future in future_to_key:
-                key = future_to_key[future]
+        results: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=min(32, len(keys) + 1)) as ex:
+            future_to_key = {ex.submit(self.get, k): k for k in keys}
+            for future, k in future_to_key.items():
                 try:
                     val = future.result()
                     if val is not None:
-                        results[key] = val
+                        results[k] = val
                 except Exception:
                     pass
         return results
 
-    def set_many(self, mapping: dict[str, Any], ttl: int = 0) -> None:
+    def set_many(self, mapping: dict[str, Any], ttl: int | float = 0) -> None:
         """Parallel set using threads."""
-        with ThreadPoolExecutor(max_workers=min(32, len(mapping) + 1)) as executor:
-            executor.map(lambda item: self.set(item[0], item[1], ttl), mapping.items())
+        with ThreadPoolExecutor(max_workers=min(32, len(mapping) + 1)) as ex:
+            ex.map(lambda item: self.set(item[0], item[1], ttl), mapping.items())

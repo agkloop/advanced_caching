@@ -10,7 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "advanced-caching"
-version = "0.2.2b0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -63,13 +63,13 @@ dev = [
 requires-dist = [
     { name = "apscheduler", specifier = ">=3.10" },
     { name = "google-cloud-monitoring", marker = "extra == 'all-metrics'", specifier = ">=2.15.0" },
-    { name = "google-cloud-monitoring", marker = "extra == 'gcp-monitoring'", specifier = ">=2.15.0" },
+    { name = "google-cloud-monitoring", marker = "extra == 'gcp-monitoring'", specifier = ">=2.28.0" },
     { name = "google-cloud-storage", marker = "extra == 'tests-gcs'", specifier = ">=2.10.0" },
     { name = "moto", extras = ["boto3"], marker = "extra == 'tests-s3'", specifier = ">=5.0.0" },
     { name = "opentelemetry-api", marker = "extra == 'all-metrics'", specifier = ">=1.20.0" },
-    { name = "opentelemetry-api", marker = "extra == 'opentelemetry'", specifier = ">=1.20.0" },
+    { name = "opentelemetry-api", marker = "extra == 'opentelemetry'", specifier = ">=1.39.1" },
     { name = "opentelemetry-sdk", marker = "extra == 'all-metrics'", specifier = ">=1.20.0" },
-    { name = "opentelemetry-sdk", marker = "extra == 'opentelemetry'", specifier = ">=1.20.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'opentelemetry'", specifier = ">=1.39.1" },
     { name = "orjson", specifier = ">=3.11.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
     { name = "pytest", marker = "extra == 'tests'" },

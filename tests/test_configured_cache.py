@@ -1,15 +1,13 @@
 import pytest
 import time
-from advanced_caching import TTLCache, SWRCache, BGCache, InMemCache
+from advanced_caching import cache, bg, InMemCache
 
 
 def test_configured_ttl_cache():
-    cache = InMemCache()
-    MyTTL = TTLCache.configure(cache=cache)
-
+    custom_cache = InMemCache()
     call_count = 0
 
-    @MyTTL.cached("key", ttl=60)
+    @cache(60, key="key", store=custom_cache)
     def func():
         nonlocal call_count
         call_count += 1
@@ -17,7 +15,7 @@ def test_configured_ttl_cache():
 
     assert func() == 1
     assert call_count == 1
-    assert cache.exists("key")
+    assert custom_cache.exists("key")
 
     # Should hit cache
     assert func() == 1
@@ -25,12 +23,10 @@ def test_configured_ttl_cache():
 
 
 def test_configured_swr_cache():
-    cache = InMemCache()
-    MySWR = SWRCache.configure(cache=cache)
-
+    custom_cache = InMemCache()
     call_count = 0
 
-    @MySWR.cached("swr", ttl=60)
+    @cache(60, key="swr", store=custom_cache)
     def func():
         nonlocal call_count
         call_count += 1
@@ -38,7 +34,7 @@ def test_configured_swr_cache():
 
     assert func() == 2
     assert call_count == 1
-    assert cache.exists("swr")
+    assert custom_cache.exists("swr")
 
     # Should hit cache
     assert func() == 2
@@ -46,12 +42,10 @@ def test_configured_swr_cache():
 
 
 def test_configured_bg_cache():
-    cache = InMemCache()
-    MyBG = BGCache.configure(cache=cache)
-
+    custom_cache = InMemCache()
     call_count = 0
 
-    @MyBG.register_loader("bg", interval_seconds=60, run_immediately=True)
+    @bg(60, key="bg", run_immediately=True, store=custom_cache)
     def func():
         nonlocal call_count
         call_count += 1
@@ -62,4 +56,4 @@ def test_configured_bg_cache():
 
     assert func() == 3
     assert call_count >= 1
-    assert cache.exists("bg")
+    assert custom_cache.exists("bg")

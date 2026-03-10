@@ -13,8 +13,8 @@ class HybridCache:
         self,
         l1_cache: CacheStorage | None = None,
         l2_cache: CacheStorage | None = None,
-        l1_ttl: int = 60,
-        l2_ttl: int | None = None,
+        l1_ttl: int | float = 60,
+        l2_ttl: int | float | None = None,
     ):
         if l2_cache is None:
             raise ValueError("l2_cache is required for HybridCache")
@@ -22,6 +22,11 @@ class HybridCache:
         self.l2 = l2_cache
         self.l1_ttl = l1_ttl
         self.l2_ttl = l2_ttl if l2_ttl is not None else l1_ttl * 2
+        # Pre-compute capability flags — checked once, not per-call.
+        self._l2_has_get_entry: bool = hasattr(l2_cache, "get_entry")
+        self._l2_has_set_entry: bool = hasattr(l2_cache, "set_entry")
+        self._l1_has_clear: bool = l1_cache is not None and hasattr(l1_cache, "clear")
+        self._l2_has_clear: bool = hasattr(l2_cache, "clear")
 
     def get(self, key: str) -> Any | None:
         value = self.l1.get(key) if self.l1 else None
@@ -32,7 +37,7 @@ class HybridCache:
             self.l1.set(key, value, self.l1_ttl)
         return value
 
-    def set(self, key: str, value: Any, ttl: int = 0) -> None:
+    def set(self, key: str, value: Any, ttl: int | float = 0) -> None:
         if self.l1:
             self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
@@ -46,7 +51,7 @@ class HybridCache:
         )
         if entry is not None:
             return entry
-        entry = self.l2.get_entry(key) if hasattr(self.l2, "get_entry") else None
+        entry = self.l2.get_entry(key) if self._l2_has_get_entry else None  # type: ignore[attr-defined]
         if entry is not None and self.l1:
             self.l1.set_entry(key, entry, ttl=self.l1_ttl)
             return entry
@@ -68,23 +73,49 @@ class HybridCache:
             self.l1.delete(key)
         self.l2.delete(key)
 
+    def clear(self) -> None:
+        """Clear all entries from both cache levels."""
+        if self._l1_has_clear and self.l1:
+            self.l1.clear()  # type: ignore[union-attr]
+        if self._l2_has_clear:
+            self.l2.clear()  # type: ignore[union-attr]
+
     def exists(self, key: str) -> bool:
         return (self.l1.exists(key) if self.l1 else False) or self.l2.exists(key)
 
-    def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
+    def set_if_not_exists(self, key: str, value: Any, ttl: int | float) -> bool:
         l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
         success = self.l2.set_if_not_exists(key, value, l2_ttl)
         if success and self.l1:
             self.l1.set(key, value, min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl)
         return success
 
-    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
-        ttl = ttl if ttl is not None else max(int(entry.fresh_until - time.time()), 0)
+    def set_entry(
+        self, key: str, entry: CacheEntry, ttl: int | float | None = None
+    ) -> None:
+        ttl = ttl if ttl is not None else max(entry.fresh_until - time.time(), 0)
         l1_ttl = min(ttl, self.l1_ttl) if ttl > 0 else self.l1_ttl
         l2_ttl = min(ttl, self.l2_ttl) if ttl > 0 else self.l2_ttl
         if self.l1:
             self.l1.set_entry(key, entry, ttl=l1_ttl)
-        if hasattr(self.l2, "set_entry"):
-            self.l2.set_entry(key, entry, ttl=l2_ttl)
+        if self._l2_has_set_entry:
+            self.l2.set_entry(key, entry, ttl=l2_ttl)  # type: ignore[attr-defined]
         else:
             self.l2.set(key, entry.value, l2_ttl)
+
+    def get_memory_usage(self) -> dict[str, Any]:
+        """Aggregate memory usage from L1 and L2 caches."""
+        total_bytes = 0
+        total_entries = 0
+
+        for cache in [self.l1, self.l2]:
+            if cache and hasattr(cache, "get_memory_usage"):
+                usage = cache.get_memory_usage()
+                total_bytes += usage.get("bytes_used", 0)
+                total_entries += usage.get("entry_count", 0)
+
+        return {
+            "bytes_used": total_bytes,
+            "entry_count": total_entries,
+            "avg_entry_size": total_bytes / total_entries if total_entries > 0 else 0,
+        }

@@ -30,6 +30,9 @@ class SharedScheduler:
 
     @classmethod
     def start(cls) -> None:
+        # Fast path: skip lock acquisition when already started.
+        if cls._started:
+            return
         with cls._lock:
             if not cls._started:
                 cls.get_scheduler().start()
@@ -66,6 +69,9 @@ class SharedAsyncScheduler:
 
     @classmethod
     def ensure_started(cls) -> None:
+        # Fast path: skip lock acquisition when already started.
+        if cls._started:
+            return
         with cls._lock:
             if not cls._started:
                 cls.get_scheduler().start()

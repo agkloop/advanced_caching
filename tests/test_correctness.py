@@ -9,10 +9,9 @@ import pytest_asyncio
 import time
 
 from advanced_caching import (
-    BGCache,
+    bg,
+    cache,
     InMemCache,
-    TTLCache,
-    SWRCache,
     HybridCache,
     validate_cache_storage,
 )
@@ -23,7 +22,7 @@ async def cleanup():
     """Clean up scheduler between tests."""
     yield
     try:
-        BGCache.shutdown(wait=False)
+        bg.shutdown(wait=False)
     except:
         pass
     await asyncio.sleep(0.05)
@@ -38,7 +37,7 @@ class TestTTLCache:
         """Test basic TTL caching with function calls."""
         call_count = {"count": 0}
 
-        @TTLCache.cached("user:{}", ttl=60)
+        @cache(60, key="user:{}")
         async def get_user(user_id):
             call_count["count"] += 1
             return {"id": user_id, "name": f"User{user_id}"}
@@ -62,7 +61,7 @@ class TestTTLCache:
         """Test that cache expires after TTL."""
         call_count = {"count": 0}
 
-        @TTLCache.cached("data:{}", ttl=0.2)
+        @cache(0.2, key="data:{}")
         async def get_data(key):
             call_count["count"] += 1
             return {"key": key, "count": call_count["count"]}
@@ -89,7 +88,7 @@ class TestTTLCache:
         """Test TTLCache with custom backend."""
         custom_cache = InMemCache()
 
-        @TTLCache.cached("item:{}", ttl=60, cache=custom_cache)
+        @cache(60, key="item:{}", store=custom_cache)
         async def get_item(item_id):
             return {"id": item_id}
 
@@ -102,7 +101,7 @@ class TestTTLCache:
     async def test_callable_key_function(self):
         """Test TTLCache with callable key function."""
 
-        @TTLCache.cached(key=lambda user_id: f"user:{user_id}", ttl=60)
+        @cache(60, key=lambda user_id: f"user:{user_id}")
         async def get_user(user_id):
             return {"id": user_id}
 
@@ -112,16 +111,16 @@ class TestTTLCache:
     async def test_isolated_caches(self):
         """Test that each TTL cached function has its own cache."""
 
-        @TTLCache.cached("user:{}", ttl=60)
+        @cache(60, key="user:{}")
         async def get_user(user_id):
             return {"type": "user", "id": user_id}
 
-        @TTLCache.cached("product:{}", ttl=60)
+        @cache(60, key="product:{}")
         async def get_product(product_id):
             return {"type": "product", "id": product_id}
 
         # Each should have its own cache
-        assert get_user._cache is not get_product._cache
+        assert get_user.store is not get_product.store
 
         # Both should work
         assert (await get_user(1))["type"] == "user"
@@ -136,7 +135,7 @@ class TestSWRCache:
         """Test SWR with fresh cache returns immediately."""
         call_count = {"count": 0}
 
-        @SWRCache.cached("user:{}", ttl=60, stale_ttl=30)
+        @cache(60, stale=30, key="user:{}")
         async def get_user(user_id):
             call_count["count"] += 1
             return {"id": user_id, "count": call_count["count"]}
@@ -155,7 +154,7 @@ class TestSWRCache:
         """Test SWR serves stale data while refreshing in background."""
         call_count = {"count": 0}
 
-        @SWRCache.cached("data:{}", ttl=0.2, stale_ttl=0.5)
+        @cache(0.2, stale=0.5, key="data:{}")
         async def get_data(key):
             call_count["count"] += 1
             return {"key": key, "count": call_count["count"]}
@@ -183,7 +182,7 @@ class TestSWRCache:
         """Test SWR refetches when too stale."""
         call_count = {"count": 0}
 
-        @SWRCache.cached("data:{}", ttl=0.1, stale_ttl=0.1)
+        @cache(0.1, stale=0.1, key="data:{}")
         async def get_data(key):
             call_count["count"] += 1
             return {"key": key, "count": call_count["count"]}
@@ -204,7 +203,7 @@ class TestSWRCache:
         """Test SWRCache with custom backend."""
         custom_cache = InMemCache()
 
-        @SWRCache.cached("item:{}", ttl=60, stale_ttl=30, cache=custom_cache)
+        @cache(60, stale=30, key="item:{}", store=custom_cache)
         async def get_item(item_id):
             return {"id": item_id}
 
@@ -221,9 +220,7 @@ class TestBGCache:
         """Test async loader with immediate execution."""
         call_count = {"count": 0}
 
-        @BGCache.register_loader(
-            "async_test", interval_seconds=10, run_immediately=True
-        )
+        @bg(10, key="async_test", run_immediately=True)
         async def load_data():
             call_count["count"] += 1
             return {"value": call_count["count"]}
@@ -244,9 +241,7 @@ class TestBGCache:
         """Test sync loader without immediate execution."""
         call_count = {"count": 0}
 
-        @BGCache.register_loader(
-            "no_immediate", interval_seconds=10, run_immediately=False
-        )
+        @bg(10, key="no_immediate", run_immediately=False)
         def load_data():
             call_count["count"] += 1
             return {"value": call_count["count"]}
@@ -265,9 +260,7 @@ class TestBGCache:
         """Test BGCache using custom cache backend."""
         custom_cache = InMemCache()
 
-        @BGCache.register_loader(
-            "custom", interval_seconds=10, run_immediately=True, cache=custom_cache
-        )
+        @bg(10, key="custom", run_immediately=True, store=custom_cache)
         async def load_data():
             return {"custom": True}
 
@@ -284,20 +277,18 @@ class TestBGCache:
     async def test_isolated_cache_instances(self):
         """Test that each loader has its own cache."""
 
-        @BGCache.register_loader("loader1", interval_seconds=10, run_immediately=True)
+        @bg(10, key="loader1", run_immediately=True)
         async def load1():
             return {"id": 1}
 
-        @BGCache.register_loader("loader2", interval_seconds=10, run_immediately=True)
+        @bg(10, key="loader2", run_immediately=True)
         async def load2():
             return {"id": 2}
 
         await asyncio.sleep(0.1)
 
         # Each should have its own cache
-        assert load1._cache is not load2._cache
-        assert load1._cache_key == "loader1"
-        assert load2._cache_key == "loader2"
+        assert load1.store is not load2.store
 
         # Each should have correct data
         assert (await load1()) == {"id": 1}
@@ -312,12 +303,7 @@ class TestBGCache:
             errors.append(e)
             error_event.set()
 
-        @BGCache.register_loader(
-            "error_test",
-            interval_seconds=10,
-            run_immediately=True,
-            on_error=error_handler,
-        )
+        @bg(10, key="error_test", run_immediately=True, on_error=error_handler)
         async def load_data():
             raise ValueError("Test error")
 
@@ -336,7 +322,7 @@ class TestBGCache:
         call_count = {"count": 0}
         load_event = asyncio.Event()
 
-        @BGCache.register_loader("periodic", interval_seconds=0.1, run_immediately=True)
+        @bg(0.1, key="periodic", run_immediately=True)
         async def load_data():
             call_count["count"] += 1
             load_event.set()
@@ -367,15 +353,15 @@ class TestBGCache:
     async def test_multiple_loaders(self):
         """Test multiple loaders can coexist."""
 
-        @BGCache.register_loader("loader_a", interval_seconds=10, run_immediately=True)
+        @bg(10, key="loader_a", run_immediately=True)
         async def load_a():
             return {"name": "a"}
 
-        @BGCache.register_loader("loader_b", interval_seconds=10, run_immediately=True)
+        @bg(10, key="loader_b", run_immediately=True)
         async def load_b():
             return {"name": "b"}
 
-        @BGCache.register_loader("loader_c", interval_seconds=10, run_immediately=True)
+        @bg(10, key="loader_c", run_immediately=True)
         async def load_c():
             return {"name": "c"}
 
@@ -390,11 +376,11 @@ class TestBGCache:
         """Test BGCache with lambda returning HybridCache."""
         call_count = {"count": 0}
 
-        @BGCache.register_loader(
-            "test_lambda_cache",
-            interval_seconds=3600,
+        @bg(
+            3600,
+            key="test_lambda_cache",
             run_immediately=True,
-            cache=lambda: HybridCache(
+            store=lambda: HybridCache(
                 l1_cache=InMemCache(), l2_cache=InMemCache(), l1_ttl=60
             ),
         )
@@ -413,9 +399,9 @@ class TestBGCache:
         assert call_count["count"] == 1  # No additional call
 
         # Verify cache object was created correctly
-        assert hasattr(get_test_data, "_cache")
-        assert get_test_data._cache is not None
-        assert isinstance(get_test_data._cache, HybridCache)
+        assert hasattr(get_test_data, "store")
+        assert get_test_data.store is not None
+        assert isinstance(get_test_data.store, HybridCache)
 
 
 @pytest.mark.asyncio
@@ -426,7 +412,7 @@ class TestCachePerformance:
     async def test_cache_hit_speed(self):
         """Test that cache hits are fast."""
 
-        @BGCache.register_loader("perf_test", interval_seconds=10, run_immediately=True)
+        @bg(10, key="perf_test", run_immediately=True)
         async def load_data():
             await asyncio.sleep(0.01)  # Simulate slow operation
             return {"data": "value"}
@@ -447,7 +433,7 @@ class TestCachePerformance:
     async def test_ttl_cache_hit_speed(self):
         """Test TTLCache hit speed."""
 
-        @TTLCache.cached("item:{}", ttl=60)
+        @cache(60, key="item:{}")
         async def get_item(item_id):
             await asyncio.sleep(0.001)  # Simulate work
             return {"id": item_id}
@@ -472,7 +458,7 @@ class TestKeyTemplates:
     async def test_ttl_positional_template(self):
         calls = {"n": 0}
 
-        @TTLCache.cached("user:{}", ttl=60)
+        @cache(60, key="user:{}")
         async def get_user(user_id: int):
             calls["n"] += 1
             return {"id": user_id}
@@ -484,7 +470,7 @@ class TestKeyTemplates:
     async def test_ttl_named_template(self):
         calls = {"n": 0}
 
-        @TTLCache.cached("user:{user_id}", ttl=60)
+        @cache(60, key="user:{user_id}")
         async def get_user(*, user_id: int):
             calls["n"] += 1
             return {"id": user_id}
@@ -496,10 +482,10 @@ class TestKeyTemplates:
     async def test_swr_default_arg_with_key_function(self):
         calls = {"n": 0}
 
-        @SWRCache.cached(
+        @cache(
+            5,
+            stale=10,
             key=lambda *a, **k: f"i18n:all:{k.get('lang', a[0] if a else 'en')}",
-            ttl=5,
-            stale_ttl=10,
         )
         async def load_all(lang: str = "en") -> dict:
             calls["n"] += 1
@@ -517,7 +503,7 @@ class TestKeyTemplates:
     async def test_swr_named_template_with_kwargs(self):
         calls = {"n": 0}
 
-        @SWRCache.cached("i18n:{lang}", ttl=5, stale_ttl=10)
+        @cache(5, stale=10, key="i18n:{lang}")
         async def load_i18n(*, lang: str = "en") -> dict:
             calls["n"] += 1
             return {"hello": f"Hello in {lang}"}
@@ -531,7 +517,7 @@ class TestKeyTemplates:
     async def test_swr_positional_template_with_args(self):
         calls = {"n": 0}
 
-        @SWRCache.cached("i18n:{}", ttl=5, stale_ttl=10)
+        @cache(5, stale=10, key="i18n:{}")
         async def load_i18n(lang: str) -> dict:
             calls["n"] += 1
             return {"hello": f"Hello in {lang}"}
@@ -545,7 +531,7 @@ class TestKeyTemplates:
     async def test_swr_named_template_with_extra_kwargs(self):
         calls = {"n": 0}
 
-        @SWRCache.cached("i18n:{lang}", ttl=5, stale_ttl=10)
+        @cache(5, stale=10, key="i18n:{lang}")
         async def load_i18n(lang: str, region: str | None = None) -> dict:
             calls["n"] += 1
             suffix = f"-{region}" if region else ""
@@ -561,7 +547,7 @@ class TestKeyTemplates:
         """Test named placeholder with positional argument in TTLCache."""
         calls = {"n": 0}
 
-        @TTLCache.cached("user:{user_id}", ttl=60)
+        @cache(60, key="user:{user_id}")
         async def get_user(user_id: int):
             calls["n"] += 1
             return {"id": user_id}
@@ -579,7 +565,7 @@ class TestKeyTemplates:
         """Test named placeholder with positional argument in SWRCache."""
         calls = {"n": 0}
 
-        @SWRCache.cached("item:{item_id}", ttl=60)
+        @cache(60, key="item:{item_id}")
         async def get_item(item_id: int):
             calls["n"] += 1
             return {"id": item_id}
@@ -593,7 +579,7 @@ class TestKeyTemplates:
         """Test multiple named placeholders with mixed positional and keyword args."""
         calls = {"n": 0}
 
-        @TTLCache.cached("u:{uid}:g:{gid}", ttl=60)
+        @cache(60, key="u:{uid}:g:{gid}")
         async def get_data(uid: int, gid: int):
             calls["n"] += 1
             return f"{uid}-{gid}"
@@ -670,7 +656,7 @@ class TestDecoratorKeyEdgeCases:
     async def test_ttl_key_without_placeholders(self):
         calls = {"n": 0}
 
-        @TTLCache.cached("static-key", ttl=60)
+        @cache(60, key="static-key")
         async def f(user_id: int):
             calls["n"] += 1
             return user_id
@@ -682,7 +668,7 @@ class TestDecoratorKeyEdgeCases:
     async def test_swr_key_without_args_or_kwargs(self):
         calls = {"n": 0}
 
-        @SWRCache.cached("static", ttl=1, stale_ttl=1)
+        @cache(1, stale=1, key="static")
         async def f() -> int:
             calls["n"] += 1
             return calls["n"]
@@ -697,7 +683,7 @@ class TestDecoratorKeyEdgeCases:
         calls = {"n": 0}
 
         # Template with positional placeholder but only kwarg passed
-        @SWRCache.cached("foo:{}", ttl=1, stale_ttl=1)
+        @cache(1, stale=1, key="foo:{}")
         async def f(*, x: int) -> int:
             calls["n"] += 1
             return x
@@ -710,7 +696,7 @@ class TestDecoratorKeyEdgeCases:
         calls = {"n": 0}
 
         # Template expects named field that is never provided; we only pass kwargs
-        @SWRCache.cached("foo:{missing}", ttl=1, stale_ttl=1)
+        @cache(1, stale=1, key="foo:{missing}")
         async def f(*, x: int) -> int:
             calls["n"] += 1
             return x
@@ -851,7 +837,7 @@ class TestNoCachingWhenZero:
     async def test_ttlcache_ttl_zero_disables_caching(self):
         calls = {"n": 0}
 
-        @TTLCache.cached("user:{}", ttl=0)
+        @cache(0, key="user:{}")
         async def get_user(user_id: int) -> int:
             calls["n"] += 1
             return calls["n"]
@@ -865,7 +851,7 @@ class TestNoCachingWhenZero:
     async def test_swrcache_ttl_zero_disables_caching(self):
         calls = {"n": 0}
 
-        @SWRCache.cached("data:{}", ttl=0, stale_ttl=10)
+        @cache(0, stale=10, key="data:{}")
         async def get_data(key: str) -> int:
             calls["n"] += 1
             return calls["n"]
@@ -879,7 +865,7 @@ class TestNoCachingWhenZero:
     async def test_bgcache_interval_zero_disables_background_and_cache(self):
         calls = {"n": 0}
 
-        @BGCache.register_loader(key="no_bg", interval_seconds=0, ttl=None)
+        @bg(0, key="no_bg", ttl=None)
         async def load_data() -> int:
             calls["n"] += 1
             return calls["n"]
@@ -893,7 +879,7 @@ class TestNoCachingWhenZero:
     async def test_bgcache_ttl_zero_disables_background_and_cache(self):
         calls = {"n": 0}
 
-        @BGCache.register_loader(key="no_bg_ttl", interval_seconds=10, ttl=0)
+        @bg(10, key="no_bg_ttl", ttl=0)
         async def load_data() -> int:
             calls["n"] += 1
             return calls["n"]

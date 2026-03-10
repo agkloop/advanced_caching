@@ -4,7 +4,8 @@ import math
 import time
 from typing import Any
 
-from .utils import CacheEntry, Serializer, _BUILTIN_SERIALIZERS
+from .utils import CacheEntry
+from ..serializers import Serializer, pack_entry, unpack_entry, resolve as _resolve_serializer
 
 try:
     import redis
@@ -13,75 +14,37 @@ except ImportError:  # pragma: no cover - optional
 
 
 class RedisCache:
-    """Redis-backed cache storage with optional dedupe writes."""
+    """Redis-backed cache storage.
+
+    Pass any :class:`~advanced_caching.serializers.Serializer` instance, including
+    ``serializers.json``, ``serializers.msgpack``, or
+    ``serializers.protobuf(MyMessage)``.  Defaults to pickle.
+
+    Example::
+
+        from advanced_caching import serializers, RedisCache
+        import redis
+
+        store = RedisCache(
+            redis.from_url("redis://localhost"),
+            prefix="myapp:",
+            serializer=serializers.json,
+        )
+    """
 
     def __init__(
         self,
         redis_client: Any,
         prefix: str = "",
-        serializer: str | Serializer | None = "pickle",
+        serializer: Serializer | None = None,
         dedupe_writes: bool = False,
     ):
         if redis is None:
             raise ImportError("redis package required. Install: pip install redis")
         self.client = redis_client
         self.prefix = prefix
-        self._serializer, self._wrap_entries = self._resolve_serializer(serializer)
+        self._ser = _resolve_serializer(serializer)
         self._dedupe_writes = dedupe_writes
-
-    @staticmethod
-    def _wrap_payload(obj: Any) -> Any:
-        if isinstance(obj, CacheEntry):
-            return {
-                "__ac_type": "entry",
-                "v": obj.value,
-                "f": obj.fresh_until,
-                "c": obj.created_at,
-            }
-        return {"__ac_type": "value", "v": obj}
-
-    @staticmethod
-    def _unwrap_payload(obj: Any) -> Any:
-        if isinstance(obj, dict):
-            obj_type = obj.get("__ac_type")
-            if obj_type == "entry":
-                return CacheEntry(
-                    value=obj.get("v"),
-                    fresh_until=float(obj.get("f", 0.0)),
-                    created_at=float(obj.get("c", 0.0)),
-                )
-            if obj_type == "value":
-                return obj.get("v")
-        return obj
-
-    def _serialize(self, obj: Any) -> bytes:
-        if self._wrap_entries:
-            return self._serializer.dumps(self._wrap_payload(obj))
-        return self._serializer.dumps(obj)
-
-    def _deserialize(self, data: bytes) -> Any:
-        obj = self._serializer.loads(data)
-        if self._wrap_entries:
-            return self._unwrap_payload(obj)
-        return obj
-
-    def _resolve_serializer(
-        self, serializer: str | Serializer | None
-    ) -> tuple[Serializer, bool]:
-        if serializer is None:
-            serializer = "pickle"
-        if isinstance(serializer, str):
-            name = serializer.lower()
-            if name not in _BUILTIN_SERIALIZERS:
-                raise ValueError("Unsupported serializer. Use 'pickle' or 'json'.")
-            serializer_obj = _BUILTIN_SERIALIZERS[name]
-            return serializer_obj, not bool(
-                getattr(serializer_obj, "handles_entries", False)
-            )
-        if hasattr(serializer, "dumps") and hasattr(serializer, "loads"):
-            wrap = not bool(getattr(serializer, "handles_entries", False))
-            return serializer, wrap
-        raise TypeError("serializer must be a string or provide dumps/loads methods")
 
     def _make_key(self, key: str) -> str:
         return f"{self.prefix}{key}"
@@ -91,26 +54,25 @@ class RedisCache:
             data = self.client.get(self._make_key(key))
             if data is None:
                 return None
-            value = self._deserialize(data)
-            if isinstance(value, CacheEntry):
-                return value.value if value.is_fresh() else None
-            return value
+            entry = unpack_entry(data, self._ser)
+            return entry.value if entry.is_fresh() else None
         except Exception:
             return None
 
-    def set(self, key: str, value: Any, ttl: int = 0) -> None:
+    def set(self, key: str, value: Any, ttl: int | float = 0) -> None:
         try:
-            data = self._serialize(value)
+            now = time.time()
+            fresh_until = now + ttl if ttl > 0 else float("inf")
+            entry = CacheEntry(value=value, fresh_until=fresh_until, created_at=now)
+            data = pack_entry(entry, self._ser)
             if self._dedupe_writes:
                 existing = self.client.get(self._make_key(key))
                 if existing is not None and existing == data:
                     if ttl > 0:
-                        expires = max(1, int(math.ceil(ttl)))
-                        self.client.expire(self._make_key(key), expires)
+                        self.client.expire(self._make_key(key), max(1, math.ceil(ttl)))
                     return
             if ttl > 0:
-                expires = max(1, int(math.ceil(ttl)))
-                self.client.setex(self._make_key(key), expires, data)
+                self.client.setex(self._make_key(key), max(1, math.ceil(ttl)), data)
             else:
                 self.client.set(self._make_key(key), data)
         except Exception as e:
@@ -125,38 +87,38 @@ class RedisCache:
     def exists(self, key: str) -> bool:
         try:
             entry = self.get_entry(key)
-            if entry is None:
-                return False
-            return entry.is_fresh()
+            return entry is not None and entry.is_fresh()
         except Exception:
             return False
 
-    def get_entry(self, key: str) -> CacheEntry | None:
+    def get_entry(self, key: str, now: float | None = None) -> CacheEntry | None:
         try:
             data = self.client.get(self._make_key(key))
             if data is None:
                 return None
-            value = self._deserialize(data)
-            if isinstance(value, CacheEntry):
-                return value
-            now = time.time()
-            return CacheEntry(value=value, fresh_until=float("inf"), created_at=now)
+            return unpack_entry(data, self._ser)
         except Exception:
             return None
 
-    def set_entry(self, key: str, entry: CacheEntry, ttl: int | None = None) -> None:
+    def set_entry(
+        self, key: str, entry: CacheEntry, ttl: int | float | None = None
+    ) -> None:
         try:
-            data = self._serialize(entry)
+            if ttl is not None:
+                now = time.time()
+                entry = CacheEntry(
+                    value=entry.value,
+                    fresh_until=now + ttl if ttl > 0 else float("inf"),
+                    created_at=now,
+                )
+            data = pack_entry(entry, self._ser)
             if self._dedupe_writes:
                 existing = self.client.get(self._make_key(key))
                 if existing is not None and existing == data:
                     if ttl is not None and ttl > 0:
-                        expires = max(1, int(math.ceil(ttl)))
-                        self.client.expire(self._make_key(key), expires)
+                        self.client.expire(self._make_key(key), max(1, math.ceil(ttl)))
                     return
-            expires = None
-            if ttl is not None and ttl > 0:
-                expires = max(1, int(math.ceil(ttl)))
+            expires = max(1, math.ceil(ttl)) if ttl is not None and ttl > 0 else None
             if expires:
                 self.client.setex(self._make_key(key), expires, data)
             else:
@@ -164,13 +126,26 @@ class RedisCache:
         except Exception as e:
             raise RuntimeError(f"Redis set_entry failed: {e}")
 
-    def set_if_not_exists(self, key: str, value: Any, ttl: int) -> bool:
+    def set_if_not_exists(self, key: str, value: Any, ttl: int | float) -> bool:
         try:
-            data = self._serialize(value)
-            expires = None
-            if ttl > 0:
-                expires = max(1, int(math.ceil(ttl)))
+            now = time.time()
+            fresh_until = now + ttl if ttl > 0 else float("inf")
+            entry = CacheEntry(value=value, fresh_until=fresh_until, created_at=now)
+            data = pack_entry(entry, self._ser)
+            expires = max(1, math.ceil(ttl)) if ttl > 0 else None
             result = self.client.set(self._make_key(key), data, ex=expires, nx=True)
             return bool(result)
         except Exception:
             return False
+
+    def clear(self) -> None:
+        """Delete all keys under this cache's prefix (or flushdb if no prefix)."""
+        try:
+            if self.prefix:
+                keys = self.client.keys(f"{self.prefix}*")
+                if keys:
+                    self.client.delete(*keys)
+            else:
+                self.client.flushdb()
+        except Exception:
+            pass

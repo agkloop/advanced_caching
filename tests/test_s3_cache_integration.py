@@ -12,7 +12,7 @@ try:
 except ImportError:  # pragma: no cover
     mock_aws = None
 
-from advanced_caching import S3Cache, TTLCache, SWRCache, ChainCache, InMemCache
+from advanced_caching import cache, S3Cache, ChainCache, InMemCache
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL")
 USE_REAL_S3 = bool(S3_ENDPOINT)
@@ -47,7 +47,7 @@ def test_s3cache_set_get_and_dedupe(dedupe):
         client.create_bucket(Bucket="test-bkt")
     except Exception:
         pass
-    cache = S3Cache(
+    store = S3Cache(
         bucket="test-bkt",
         prefix="t/",
         s3_client=client,
@@ -55,14 +55,14 @@ def test_s3cache_set_get_and_dedupe(dedupe):
         dedupe_writes=dedupe,
     )
 
-    cache.set("k1", {"v": 1}, ttl=0)
-    assert cache.get("k1") == {"v": 1}
+    store.set("k1", {"v": 1}, ttl=0)
+    assert store.get("k1") == {"v": 1}
 
-    cache.set("k1", {"v": 1}, ttl=0)
-    assert cache.get("k1") == {"v": 1}
+    store.set("k1", {"v": 1}, ttl=0)
+    assert store.get("k1") == {"v": 1}
 
-    cache.set("k1", {"v": 2}, ttl=0)
-    assert cache.get("k1") == {"v": 2}
+    store.set("k1", {"v": 2}, ttl=0)
+    assert store.get("k1") == {"v": 2}
 
 
 @_maybe_mock
@@ -72,7 +72,7 @@ def test_ttlcache_with_s3cache_decorator():
         client.create_bucket(Bucket="test-bkt")
     except Exception:
         pass
-    cache = S3Cache(
+    store = S3Cache(
         bucket="test-bkt",
         prefix="u/",
         s3_client=client,
@@ -83,7 +83,7 @@ def test_ttlcache_with_s3cache_decorator():
 
     calls = {"n": 0}
 
-    @TTLCache.cached("user:{user_id}", ttl=0.2, cache=cache)
+    @cache(0.2, key="user:{user_id}", store=store)
     def fetch_user(user_id: int):
         calls["n"] += 1
         return {"id": user_id, "n": calls["n"]}
@@ -94,7 +94,7 @@ def test_ttlcache_with_s3cache_decorator():
 
     time.sleep(1.0)
     # Force delete to ensure cache miss if TTL/time drift is an issue
-    cache.delete("user:1")
+    store.delete("user:1")
     third = fetch_user(1)
     # TTL expired, should recompute
     assert third["n"] >= 2
@@ -107,13 +107,13 @@ def test_swrcache_with_s3cache_decorator():
         client.create_bucket(Bucket="test-bkt-swr")
     except Exception:
         pass
-    cache = S3Cache(
+    store = S3Cache(
         bucket="test-bkt-swr", prefix="swr/", s3_client=client, serializer="json"
     )
 
     calls = {"n": 0}
 
-    @SWRCache.cached("data:{id}", ttl=0.5, stale_ttl=1.0, cache=cache)
+    @cache(0.5, stale=1.0, key="data:{id}", store=store)
     def fetch_data(id: int):
         calls["n"] += 1
         return {"id": id, "n": calls["n"]}
@@ -126,7 +126,7 @@ def test_swrcache_with_s3cache_decorator():
     v2 = fetch_data(1)
     assert v2["n"] == 1
 
-    # 3. Wait for TTL to expire but within stale_ttl
+    # 3. Wait for TTL to expire but within stale window
     time.sleep(0.6)
     # Should return stale value immediately, trigger background refresh
     v3 = fetch_data(1)

@@ -2,7 +2,7 @@ import asyncio
 import time
 import pytest
 
-from advanced_caching import BGCache, InMemCache
+from advanced_caching import bg, InMemCache, InMemoryMetrics
 
 
 @pytest.mark.asyncio
@@ -11,28 +11,16 @@ async def test_single_writer_multi_reader_async_with_fallback():
 
     shared_cache = InMemCache()
 
-    @BGCache.register_writer(
-        "shared", interval_seconds=0.01, run_immediately=True, cache=shared_cache
-    )
+    @bg.write(0.01, key="shared", run_immediately=True, store=shared_cache)
     async def writer():
         calls["n"] += 1
         return {"value": calls["n"]}
 
-    reader_cache = shared_cache
-
-    reader_a = BGCache.get_reader(
-        "shared",
-        interval_seconds=0.01,
-        ttl=None,
-        run_immediately=True,
-        cache=reader_cache,
+    reader_a = bg.read(
+        "shared", interval=0.01, ttl=None, run_immediately=True, store=shared_cache
     )
-    reader_b = BGCache.get_reader(
-        "shared",
-        interval_seconds=0.01,
-        ttl=None,
-        run_immediately=True,
-        cache=reader_cache,
+    reader_b = bg.read(
+        "shared", interval=0.01, ttl=None, run_immediately=True, store=shared_cache
     )
 
     async def wait_for_value(reader, timeout=0.2):
@@ -53,62 +41,48 @@ async def test_single_writer_multi_reader_async_with_fallback():
     v3 = await wait_for_value(reader_a)
     assert v3 is not None and v3.get("value", 0) >= v1.get("value", 0)
 
-    BGCache.shutdown()
+    bg.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_reader_without_fallback_returns_none():
-    reader = BGCache.get_reader(
-        "missing", interval_seconds=0, ttl=0, run_immediately=False
-    )
+    reader = bg.read("missing_key_xyz", interval=0, ttl=0, run_immediately=False)
     assert reader() is None
-    BGCache.shutdown()
+    bg.shutdown()
 
 
 def test_single_writer_enforced_sync():
-    @BGCache.register_writer(
-        "only_one", interval_seconds=0.01, run_immediately=False, cache=InMemCache()
-    )
+    @bg.write(0.01, key="only_one", run_immediately=False, store=InMemCache())
     def writer():
         return 1
 
     with pytest.raises(ValueError):
 
-        @BGCache.register_writer("only_one", interval_seconds=0.01)
+        @bg.write(0.01, key="only_one")
         def writer2():
             return 2
 
-    BGCache.shutdown()
+    bg.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_sync_writer_async_reader_fallback_runs_in_executor():
     calls = {"n": 0}
-
     shared_cache = InMemCache()
 
-    @BGCache.register_writer(
-        "mix", interval_seconds=0.01, ttl=1, run_immediately=False, cache=shared_cache
-    )
+    @bg.write(0.01, key="mix", ttl=1, run_immediately=False, store=shared_cache)
     def writer_sync():
         calls["n"] += 1
         return calls["n"]
 
-    reader_async = BGCache.get_reader(
-        "mix",
-        interval_seconds=0.01,
-        ttl=1,
-        run_immediately=False,
-        cache=shared_cache,
+    reader_async = bg.read(
+        "mix", interval=0.01, ttl=1, run_immediately=False, store=shared_cache
     )
 
-    # First call triggers load_once pull from source cache (which is empty at start)
     assert reader_async() is None
-    # Populate source via writer
     _ = writer_sync()
     await asyncio.sleep(0.05)
 
-    # Reader should eventually see the value after writer populates source cache.
     async def wait_for_value(reader, timeout=0.5):
         start = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start < timeout:
@@ -119,8 +93,7 @@ async def test_sync_writer_async_reader_fallback_runs_in_executor():
         return None
 
     assert await wait_for_value(reader_async) is not None
-
-    BGCache.shutdown()
+    bg.shutdown()
 
 
 @pytest.mark.asyncio
@@ -128,22 +101,13 @@ async def test_e2e_async_writer_reader_background_refresh():
     shared_cache = InMemCache()
     calls = {"n": 0}
 
-    @BGCache.register_writer(
-        "bg_async",
-        interval_seconds=0.05,
-        run_immediately=True,
-        cache=shared_cache,
-    )
+    @bg.write(0.05, key="bg_async", run_immediately=True, store=shared_cache)
     async def writer_async():
         calls["n"] += 1
         return {"count": calls["n"]}
 
-    reader = BGCache.get_reader(
-        "bg_async",
-        interval_seconds=0.05,
-        ttl=None,
-        run_immediately=True,
-        cache=shared_cache,
+    reader = bg.read(
+        "bg_async", interval=0.05, ttl=None, run_immediately=True, store=shared_cache
     )
 
     async def wait_for_value(reader, min_count, timeout=0.5):
@@ -157,33 +121,23 @@ async def test_e2e_async_writer_reader_background_refresh():
 
     first = await wait_for_value(reader, 1)
     assert first is not None and first.get("count", 0) >= 1
-
     updated = await wait_for_value(reader, 2)
     assert updated is not None and updated.get("count", 0) >= 2
 
-    BGCache.shutdown()
+    bg.shutdown()
 
 
 def test_e2e_sync_writer_reader_background_refresh():
     shared_cache = InMemCache()
     calls = {"n": 0}
 
-    @BGCache.register_writer(
-        "bg_sync",
-        interval_seconds=0.05,
-        run_immediately=True,
-        cache=shared_cache,
-    )
+    @bg.write(0.05, key="bg_sync", run_immediately=True, store=shared_cache)
     def writer_sync():
         calls["n"] += 1
         return {"count": calls["n"]}
 
-    reader = BGCache.get_reader(
-        "bg_sync",
-        interval_seconds=0.05,
-        ttl=None,
-        run_immediately=True,
-        cache=shared_cache,
+    reader = bg.read(
+        "bg_sync", interval=0.05, ttl=None, run_immediately=True, store=shared_cache
     )
 
     def wait_for_value(reader_fn, min_count, timeout=0.5):
@@ -197,6 +151,75 @@ def test_e2e_sync_writer_reader_background_refresh():
 
     first = wait_for_value(reader, 1)
     assert first is not None and first.get("count", 0) >= 1
-
     updated = wait_for_value(reader, 2)
     assert updated is not None and updated.get("count", 0) >= 2
+
+
+def test_multiple_readers_independent_local_caches():
+    """Each bg.read() call creates an independent local mirror cache."""
+    shared = InMemCache()
+    shared.set("ikey", {"v": 1}, ttl=3600)
+
+    r1 = bg.read("ikey", interval=1, store=shared)
+    r2 = bg.read("ikey", interval=1, store=shared)
+
+    assert r1.store is not r2.store, "each reader must have its own local cache"
+    assert r1() == r2() == {"v": 1}
+
+    bg.shutdown()
+
+
+def test_reader_auto_discovers_writer_store():
+    """bg.read(key) with store=None uses the writer's store automatically."""
+    writer_store = InMemCache()
+    writer_store.set("autodisco_key", {"payload": "hello"}, ttl=3600)
+
+    @bg.write(60, key="autodisco_key", store=writer_store, run_immediately=False)
+    def noop_writer():
+        return {}
+
+    reader = bg.read("autodisco_key")  # no store= → auto-discover
+    assert reader() == {"payload": "hello"}
+
+    bg.shutdown()
+
+
+def test_writer_metrics_record_background_refresh():
+    """bg.write with metrics= tracks successful background refreshes."""
+    metrics = InMemoryMetrics()
+    store = InMemCache()
+    calls = {"n": 0}
+
+    @bg.write(
+        0.05, key="metered_writer", store=store, metrics=metrics, run_immediately=True
+    )
+    def refresh():
+        calls["n"] += 1
+        return {"count": calls["n"]}
+
+    time.sleep(0.15)
+
+    stats = metrics.get_stats()
+    bg_stats = stats.get("background_refresh", {})
+    assert "metered_writer" in bg_stats
+    assert bg_stats["metered_writer"]["success"] >= 1
+
+    bg.shutdown()
+
+
+def test_writer_metrics_on_error():
+    """bg.write with metrics= tracks failed refreshes."""
+    metrics = InMemoryMetrics()
+
+    @bg.write(0.05, key="failing_writer", metrics=metrics, run_immediately=True)
+    def bad_writer():
+        raise RuntimeError("intentional")
+
+    time.sleep(0.15)
+
+    stats = metrics.get_stats()
+    bg_stats = stats.get("background_refresh", {})
+    assert "failing_writer" in bg_stats
+    assert bg_stats["failing_writer"]["failure"] >= 1
+
+    bg.shutdown()

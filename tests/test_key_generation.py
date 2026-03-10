@@ -1,10 +1,10 @@
 import pytest
-from advanced_caching.decorators import _create_smart_key_fn
+from advanced_caching._cache import _make_key_fn
 
 
 class TestSmartKeyGeneration:
     """
-    Unit tests for _create_smart_key_fn to ensure robust cache key generation.
+    Unit tests for _make_key_fn to ensure robust cache key generation.
     """
 
     def test_static_key(self):
@@ -13,7 +13,7 @@ class TestSmartKeyGeneration:
         def func(a, b):
             pass
 
-        key_fn = _create_smart_key_fn("static-key", func)
+        key_fn = _make_key_fn("static-key", func)
         assert key_fn(1, 2) == "static-key"
         assert key_fn(a=1, b=2) == "static-key"
 
@@ -26,7 +26,7 @@ class TestSmartKeyGeneration:
         def my_key_gen(a):
             return f"custom:{a}"
 
-        key_fn = _create_smart_key_fn(my_key_gen, func)
+        key_fn = _make_key_fn(my_key_gen, func)
         assert key_fn(1) == "custom:1"
 
     def test_simple_positional_optimization(self):
@@ -35,7 +35,7 @@ class TestSmartKeyGeneration:
         def func(user_id):
             pass
 
-        key_fn = _create_smart_key_fn("user:{}", func)
+        key_fn = _make_key_fn("user:{}", func)
 
         # Positional arg
         assert key_fn(123) == "user:123"
@@ -52,7 +52,7 @@ class TestSmartKeyGeneration:
         def func(user_id):
             pass
 
-        key_fn = _create_smart_key_fn("user:{user_id}", func)
+        key_fn = _make_key_fn("user:{user_id}", func)
         assert key_fn(user_id=123) == "user:123"
 
     def test_named_placeholder_positional(self):
@@ -61,7 +61,7 @@ class TestSmartKeyGeneration:
         def func(user_id, other):
             pass
 
-        key_fn = _create_smart_key_fn("user:{user_id}", func)
+        key_fn = _make_key_fn("user:{user_id}", func)
         assert key_fn(123, "ignore") == "user:123"
 
     def test_named_placeholder_defaults(self):
@@ -70,7 +70,7 @@ class TestSmartKeyGeneration:
         def func(user_id=999):
             pass
 
-        key_fn = _create_smart_key_fn("user:{user_id}", func)
+        key_fn = _make_key_fn("user:{user_id}", func)
 
         # Use default
         assert key_fn() == "user:999"
@@ -84,7 +84,7 @@ class TestSmartKeyGeneration:
         def func(a, b, c):
             pass
 
-        key_fn = _create_smart_key_fn("{a}:{b}:{c}", func)
+        key_fn = _make_key_fn("{a}:{b}:{c}", func)
 
         # a=1 (pos), b=2 (pos), c=3 (kw)
         assert key_fn(1, 2, c=3) == "1:2:3"
@@ -97,7 +97,7 @@ class TestSmartKeyGeneration:
         def func(a, b):
             pass
 
-        key_fn = _create_smart_key_fn("{}:{}", func)
+        key_fn = _make_key_fn("{}:{}", func)
         assert key_fn(1, 2) == "1:2"
 
     def test_missing_argument_returns_template(self):
@@ -106,7 +106,7 @@ class TestSmartKeyGeneration:
         def func(a, b):
             pass
 
-        key_fn = _create_smart_key_fn("key:{a}", func)
+        key_fn = _make_key_fn("key:{a}", func)
 
         # 'a' is missing from args/kwargs and has no default
         # format() raises KeyError, fallback format(*args) raises IndexError/ValueError
@@ -119,7 +119,7 @@ class TestSmartKeyGeneration:
         def func(a, **kwargs):
             pass
 
-        key_fn = _create_smart_key_fn("{a}:{extra}", func)
+        key_fn = _make_key_fn("{a}:{extra}", func)
 
         assert key_fn(1, extra="value") == "1:value"
 
@@ -129,7 +129,7 @@ class TestSmartKeyGeneration:
         def func(a, b):
             pass
 
-        key_fn = _create_smart_key_fn("prefix:{}-suffix:{}", func)
+        key_fn = _make_key_fn("prefix:{}-suffix:{}", func)
         assert key_fn(1, 2) == "prefix:1-suffix:2"
 
     def test_format_specifiers(self):
@@ -138,7 +138,7 @@ class TestSmartKeyGeneration:
         def func(price):
             pass
 
-        key_fn = _create_smart_key_fn("price:{price:.2f}", func)
+        key_fn = _make_key_fn("price:{price:.2f}", func)
         assert key_fn(12.3456) == "price:12.35"
 
     def test_object_str_representation(self):
@@ -154,5 +154,5 @@ class TestSmartKeyGeneration:
         def func(user):
             pass
 
-        key_fn = _create_smart_key_fn("obj:{user}", func)
+        key_fn = _make_key_fn("obj:{user}", func)
         assert key_fn(User(42)) == "obj:User(42)"
